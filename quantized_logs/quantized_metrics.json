@@ -2,25 +2,25 @@
   "FP32": {
     "Acc": 0.9822,
     "Flash (KB)": 815.1767578125,
-    "RAM (KB)": 0.0,
+    "RAM (KB)": 1760.0,
     "MACs (M)": 1.293312,
     "Params (K)": 207.018,
-    "Latency": "0.26\u00b10.08"
+    "Latency": "0.25\u00b10.06"
   },
   "Pruned": {
     "Acc": 0.9871,
     "Flash (KB)": 815.2236328125,
-    "RAM (KB)": 944.0,
+    "RAM (KB)": 16.0,
     "MACs (M)": 1.218048,
     "Params (K)": 206.922,
-    "Latency": "0.53\u00b10.05"
+    "Latency": "0.52\u00b10.04"
   },
   "Pruned+INT8": {
-    "Acc": 0.9868,
+    "Acc": 0.9865,
     "Flash (KB)": 209.2158203125,
-    "RAM (KB)": 3088.0,
+    "RAM (KB)": 10288.0,
     "MACs (M)": 0.0,
     "Params (K)": 0.0,
-    "Latency": "0.22\u00b10.02"
+    "Latency": "0.23\u00b10.01"
   }
 }
