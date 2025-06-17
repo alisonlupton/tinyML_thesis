@@ -14,7 +14,6 @@ from avalanche.benchmarks import SplitMNIST
 from avalanche.evaluation.metrics import accuracy_metrics, forgetting_metrics
 from avalanche.training.plugins.evaluation import EvaluationPlugin
 from avalanche.training.supervised import Naive
-from avalanche.training import Replay
 from avalanche.logging.csv_logger import CSVLogger
 import json
 import csv
@@ -175,75 +174,21 @@ def calculate_metrics(models, model_paths, train_loader, test_loader, device):
         }
     return results
         
-def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logger, replay: bool=False, mem_size: int=200):
-    
+def run_continual(model, scenario, device, csv_logger):
     evaluator = EvaluationPlugin(
-    accuracy_metrics(experience=True, stream=True),
-    forgetting_metrics(experience=True, stream=True),
-    loggers=[csv_logger])
-    
-    StrategyCls = Replay if replay else Naive
-    strategy_args = {
-        "model":       model,
-        "optimizer":   torch.optim.SGD(trainable_params, lr=1e-2),
-        "criterion":   nn.CrossEntropyLoss(),
-        "train_mb_size": 64,
-        "train_epochs": 1,
-        "eval_mb_size": 1000,
-        "device":       device,
-        "evaluator":    evaluator
-    }
-    
-    if replay:
-        strategy_args["mem_size"] = mem_size
-    strategy = StrategyCls(**strategy_args)
-    
+        accuracy_metrics(experience=True, stream=True),
+        forgetting_metrics(experience=True, stream=True),
+        loggers=[csv_logger]  
+    )
+    strategy = Naive(model, torch.optim.SGD(model.parameters(),lr=0.01),
+                     nn.CrossEntropyLoss(),
+                     train_mb_size=64, train_epochs=1,
+                     eval_mb_size=1000, device=device,
+                     evaluator=evaluator)
     for exp in scenario.train_stream:
         strategy.train(exp)
         strategy.eval(scenario.test_stream)
-
     return evaluator
-
-# Classifier head for ODL 
-class AdapterHead(nn.Module):
-    def __init__(self, in_features=128, num_classes=10, bottleneck=32):
-        super().__init__()
-        # a low-rank adapter: down-project → nonlinearity → up-project
-        self.down = nn.Linear(in_features, bottleneck)
-        self.relu = nn.ReLU(inplace=True)
-        self.up   = nn.Linear(bottleneck, num_classes)
-    def forward(self, x):
-        # x is shape (batch, 128)
-        x = self.down(x)
-        x = self.relu(x)
-        return self.up(x)
-    
-class TinyMLContinualModel(nn.Module):
-    def __init__(self, backbone_int8: nn.Module, adapter: nn.Module):
-        super().__init__()
-        self.backbone = backbone_int8
-        # make sure backbone is in eval and frozen
-        self.backbone.eval()
-        for p in self.backbone.parameters():
-            p.requires_grad = False
-
-        self.adapter = adapter  # only this is trainable
-
-    def forward(self, x):
-        # run INT8 backbone up to penultimate layer
-        # assume backbone returns logits at fc2, so we'd need to hook earlier.
-        # For simplicity let's reimplement forward:
-        with torch.no_grad():
-            x = self.backbone.quant(x)
-            x = F.relu(F.max_pool2d(self.backbone.bn1(self.backbone.conv1(x)), 2))
-            x = F.relu(F.max_pool2d(self.backbone.bn2(self.backbone.conv2(x)), 2))
-            x = x.flatten(start_dim=1)
-            x = self.backbone.fc1(x)
-            # DEQUANT here  
-            x = self.backbone.dequant(x)
-            x = F.relu(x)
-        # now pass through adapter head (float)
-        return self.adapter(x)
 
 ########################################################################################################
                             ############# MAIN FUNCTION LOOP ##########
@@ -255,13 +200,11 @@ def main():
     # Define model paths
     MODEL_PATH           = "mnist_fp32.pth"
     PRUNED_PATH          = "mnist_pruned.pth"
-    BACKBONE     = "mnist_backbone_int8.pth"
-    HYBRID = "mnist_hybrid.pth"
+    PRUNED_INT8_PATH     = "mnist_pruned_int8.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
-        "Backbone":    BACKBONE,
-        "Hybrid": HYBRID
+        "Pruned+INT8":    PRUNED_INT8_PATH
     }
     
 
@@ -287,7 +230,7 @@ def main():
             torch.save(model_fp32.state_dict(), MODEL_PATH)
             print(f"Model saved to {MODEL_PATH}")
     
-    # ----- 3. Prune FP32 and retrain (currently applying unstructured pruning so I won't see benefits)
+    # ----- 3 Prune FP32 and retrain (currently applying unstructured pruning so I won't see benefits)
     model_pruned = TinyCNN().to(device)
     if not retrain:
         if os.path.exists(PRUNED_PATH):
@@ -302,55 +245,14 @@ def main():
 
     # ----- 4. PTQ (from 32 --> 8)
     model_quant = quantize(model_pruned, train_loader, device)
-    torch.save(model_quant.state_dict(), BACKBONE)
-    print(f"Model saved to {BACKBONE}")
+    torch.save(model_quant.state_dict(), PRUNED_INT8_PATH)
+    print(f"Model saved to {PRUNED_INT8_PATH}")
     
-    
-    # ----- 5. Combine PQT + classifier head
-    model_quant.cpu()
-    
-    # initialise an adapter head 
-    adapter = AdapterHead(in_features=128, num_classes=10, bottleneck=32).to(device)
-    
-    hybrid_model = TinyMLContinualModel(model_quant, adapter).to(device)
-    torch.save(hybrid_model.state_dict(), HYBRID)
-    print(f"Model saved to {HYBRID}")
- 
-    # ----- 6. Continual learning
-    scenario   = SplitMNIST(n_experiences=5)
-    csv_logger = CSVLogger(log_folder="avalanche_logs_adapters")
-    # Naïve adapter-only
-    run_continual(
-        model=hybrid_model,
-        trainable_params=adapter.parameters(),
-        scenario=scenario,
-        device=device,
-        csv_logger=csv_logger,
-        replay=False
-    )
-
-    # Replay adapter-only
-    csv_logger_replay = CSVLogger(log_folder="avalanche_logs_adapters_replay")
-    run_continual(
-        model=hybrid_model,
-        trainable_params=adapter.parameters(),
-        scenario=scenario,
-        device=device,
-        csv_logger=csv_logger_replay,
-        replay=True,
-        mem_size=200
-    )
-    print("Continual metrics saved")
-    
-    
-    
-    
-    # ----- 7. Metrics 
+    # ----- 5. Metrics 
     models = {
         "FP32":        model_fp32,
         "Pruned":      model_pruned,
-        "Backbone": model_quant,
-        "Hybrid": hybrid_model
+        "Pruned+INT8": model_quant
     }
     metrics = calculate_metrics(models, model_paths, train_loader, test_loader, device)
 
@@ -378,6 +280,12 @@ def main():
     # print(f"Static metrics:{metrics}")
     print("Metrics saved sucessfuly")
     
+    # ----- 6. Continual learning
+    csv_logger = CSVLogger(
+        log_folder="avalanche_logs"
+    )
+    run_continual(model_pruned, scenario, device, csv_logger)
+    print("Continual metrics saved")
     
     
 if __name__ == "__main__":
