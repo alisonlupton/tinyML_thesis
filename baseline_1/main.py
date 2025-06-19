@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import os
 import psutil
-from thop import profile
+from thop import profile as thop_profile
+from memory_profiler import memory_usage    
 import time
 import torch.nn.utils.prune as prune
 from avalanche.benchmarks import SplitMNIST
@@ -18,6 +19,7 @@ from avalanche.training import Replay
 from avalanche.logging.csv_logger import CSVLogger
 import json
 import csv
+
 
 # -----  Base CNN Model 
 class TinyCNN(nn.Module):
@@ -67,6 +69,7 @@ def train_on_loader(model, loader, optimizer, criterion, device, epochs):
             loss = criterion(model(x), y)
             loss.backward()
             optimizer.step()
+
             
 def eval_model(model, loader, device):
     model.eval()
@@ -131,6 +134,17 @@ def peak_ram_delta(model, loader, process, device):
 
             # Return the extra memory your model+activations used, in KB
             return (peak - base) / 1024
+# -----  Metrics helper        
+def host_latency(model, iters=100):
+    xs = torch.randn(1,1,28,28)
+    # warm-up
+    for _ in range(10): model(xs)
+    times = []
+    for _ in range(iters):
+        t0 = time.perf_counter()
+        model(xs)
+        times.append(time.perf_counter()-t0)
+    return (sum(times)/iters)*1e3  # ms
 # -----  Metrics helper
 def latency(m, iters=50):
             xs = torch.randn(1,1,28,28)
@@ -143,7 +157,7 @@ def latency(m, iters=50):
                 m(xs)
                 times.append((time.perf_counter() - t0) * 1e3)
             return sum(times)/len(times), torch.std(torch.tensor(times))
-        
+     
 # -----  Metrics 
 def calculate_metrics(models, model_paths, train_loader, test_loader, device):  
     proc = psutil.Process(os.getpid())
@@ -157,13 +171,15 @@ def calculate_metrics(models, model_paths, train_loader, test_loader, device):
         # Non-volatile storage where I place my program binary and model weights, e.g. quantized .pth
         flash = os.path.getsize(model_paths[name]) / 1024
         
-        # MACs & Params (remember Multiply–Accumulate operations --> quantify the compute cost of a NN layer)
-        macs, params = profile(m, inputs=(torch.randn(1,1,28,28),))
+        
+        
+        # MACs & Params (remember Multiply–Accumulate operations --> quantify the compute cost of a NN, FLOPS is about 2x MACS)
+        dummy = torch.randn(1,1,28,28)
+        macs, params = thop_profile(m, (dummy,)) 
         macs_m = macs / 1e6 # measured in millions/kilo
         params_k = params / 1e3 # measured in millions/kilo
         
-        mean, std = latency(m)
-        lat_str = f"{mean:.2f}±{std:.2f}"
+        lat = host_latency(m, iters=100)
         
         results[name] = {
         "Acc":        acc,
@@ -171,10 +187,11 @@ def calculate_metrics(models, model_paths, train_loader, test_loader, device):
         "RAM (KB)":   ram,
         "MACs (M)":   macs_m,
         "Params (K)": params_k,
-        "Latency":    lat_str
+        "Latency":    lat
         }
     return results
-        
+
+# -----  Continual learning
 def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logger, replay: bool=False, mem_size: int=200):
     
     evaluator = EvaluationPlugin(
@@ -187,7 +204,7 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
         "model":       model,
         "optimizer":   torch.optim.SGD(trainable_params, lr=1e-2),
         "criterion":   nn.CrossEntropyLoss(),
-        "train_mb_size": 64,
+        "train_mb_size": 16,
         "train_epochs": 1,
         "eval_mb_size": 1000,
         "device":       device,
@@ -204,7 +221,18 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
 
     return evaluator
 
-# Classifier head for ODL 
+
+# -----  Metrics helper for continual learning
+def measure_continual(mem_func, interval=0.1):
+    # Gives peak_rss_delta (in MiB)
+
+    trace = memory_usage((mem_func, ), interval=interval, retval=False)
+    base = trace[0]
+    peak = max(trace)
+    return peak - base
+
+# Classifier head for ODL, adds down projection, relu, up projection to get some CL involved. 
+# Gets added to my quantised base model ;
 class AdapterHead(nn.Module):
     def __init__(self, in_features=128, num_classes=10, bottleneck=32):
         super().__init__()
@@ -281,6 +309,17 @@ def main():
             model_fp32.load_state_dict(torch.load(MODEL_PATH))
         else:
             # --- Train from scratch
+            print(f"Training new model: {MODEL_PATH}")
+
+            train_on_loader(model_fp32, train_loader,
+                        torch.optim.SGD(model_fp32.parameters(),lr=0.01),
+                        nn.CrossEntropyLoss(), device, 5)
+            torch.save(model_fp32.state_dict(), MODEL_PATH)
+            print(f"Model saved to {MODEL_PATH}")
+    else:
+            # --- Train from scratch
+            print(f"Training new model: {MODEL_PATH}")
+
             train_on_loader(model_fp32, train_loader,
                         torch.optim.SGD(model_fp32.parameters(),lr=0.01),
                         nn.CrossEntropyLoss(), device, 5)
@@ -295,6 +334,14 @@ def main():
             model_pruned.load_state_dict(torch.load(PRUNED_PATH))
         else:
             # --- Prune and tune from scratch
+            print(f"Training new model: {PRUNED_PATH}")
+            model_pruned = prune_and_finetune(model_fp32, train_loader, device,
+                                    sparsity=0.5, finetune_epochs=3)
+            torch.save(model_pruned.state_dict(), PRUNED_PATH)
+            print(f"Model saved to {PRUNED_PATH}")
+    else:
+            # --- Prune and tune from scratch
+            print(f"Training new model: {PRUNED_PATH}")
             model_pruned = prune_and_finetune(model_fp32, train_loader, device,
                                     sparsity=0.5, finetune_epochs=3)
             torch.save(model_pruned.state_dict(), PRUNED_PATH)
@@ -319,29 +366,48 @@ def main():
     # ----- 6. Continual learning
     scenario   = SplitMNIST(n_experiences=5)
     csv_logger = CSVLogger(log_folder="avalanche_logs_adapters")
+    csv_logger_replay = CSVLogger(log_folder="avalanche_logs_adapters_replay")
+
     # Naïve adapter-only
-    run_continual(
-        model=hybrid_model,
-        trainable_params=adapter.parameters(),
-        scenario=scenario,
-        device=device,
-        csv_logger=csv_logger,
-        replay=False
-    )
+    def profiled_replay_run():
+        # this calls exactly what you do for replay‐enabled continual learning
+        run_continual(
+            model=hybrid_model,
+            trainable_params=adapter.parameters(),
+            scenario=scenario,
+            device=device,
+            csv_logger=csv_logger,
+            replay=False
+        )
+    naive_mem_delta = measure_continual(profiled_replay_run, interval=0.05)
+    print(f"Naïve training RAM delta on host: {naive_mem_delta:.1f} MiB")
+
 
     # Replay adapter-only
-    csv_logger_replay = CSVLogger(log_folder="avalanche_logs_adapters_replay")
-    run_continual(
-        model=hybrid_model,
-        trainable_params=adapter.parameters(),
-        scenario=scenario,
-        device=device,
-        csv_logger=csv_logger_replay,
-        replay=True,
-        mem_size=200
-    )
-    print("Continual metrics saved")
+    def profiled_replay_run():
+        # this calls exactly what you do for replay‐enabled continual learning
+        run_continual(
+            model=hybrid_model,
+            trainable_params=adapter.parameters(),
+            scenario=scenario,
+            device=device,
+            csv_logger=csv_logger_replay,
+            replay=True,
+            mem_size=200
+        )
+    replay_mem_delta = measure_continual(profiled_replay_run, interval=0.05)
+    print(f"Replay training RAM delta on host: {replay_mem_delta:.1f} MiB")
     
+    with open("continual_memory_usage.csv", "w", newline="") as fp:
+        writer = csv.writer(fp)
+        # header
+        writer.writerow(["strategy", "mem_delta_MiB"])
+        # data rows
+        writer.writerow(["naive",  f"{naive_mem_delta:.2f}"])
+        writer.writerow(["replay", f"{replay_mem_delta:.2f}"])
+    
+    print("Wrote continual_memory_usage.csv")
+    print("Continual metrics saved")
     
     
     

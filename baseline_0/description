@@ -1,0 +1,4 @@
+# Base Model 
+No continual learning, simply a small CNN (“TinyCNN”) trained in full-precision on MNIST. Then unstructured L1 pruning 
+(50% sparsity) and (PTQ to int8) are applied. Basic memory metrics are measured, and accuracy is high because we have
+entire dataset. 
