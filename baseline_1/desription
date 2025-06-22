@@ -1,4 +1,4 @@
-# Basic model with conitnual learning tried out. 
+# Basic model with continual learning tried out. 
 PTQ and unstructured pruning (50%) still used, continuing from baseline_0, 
 but an adapter head was added. We freeze the quantized backbone and attach a tiny float-precision “adapter head”  
 (a 128→32 down + ReLU + 32→10 output) that is trainable. The metrics between the FP32 vs pruned vs quantized vs hybrid
