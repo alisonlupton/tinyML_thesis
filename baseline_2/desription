@@ -1,0 +1,5 @@
+# Still implemented basic model with CL  
+PTQ and unstructured pruning (50%) still used, continuing from baseline_1, not much changed with the model.  
+I only measured avalanche with batch size 2, replay size 200. This achieved very good accuracy with just the basic adapter
+head and simple replay. Next steps are to try new datasets, and start implementing on tflite so that I'm able to get better 
+measurments of space. Assuming accuracy drops and space becomes an issue I will test out more complex strategies. The novel part of this baseline is nailing down the metric measurments for continual learning, found in CL_metrics_extended.csv 

@@ -6,7 +6,6 @@ import torch.quantization as tq
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import os
-import psutil
 from thop import profile as thop_profile
 from memory_profiler import memory_usage    
 import time
@@ -17,8 +16,11 @@ from avalanche.training.plugins.evaluation import EvaluationPlugin
 from avalanche.training.supervised import Naive
 from avalanche.training import Replay
 from avalanche.logging.csv_logger import CSVLogger
-import json
 import csv
+import numpy as np 
+import pandas as pd
+import psutil
+import threading
 
 
 # -----  Base CNN Model 
@@ -159,7 +161,7 @@ def latency(m, iters=50):
             return sum(times)/len(times), torch.std(torch.tensor(times))
      
 # -----  Metrics 
-def calculate_metrics(models, model_paths, train_loader, test_loader, device):  
+def tiny_ML_metrics(models, model_paths, train_loader, test_loader, device):  
     proc = psutil.Process(os.getpid())
     results = {}
     for name, m in models.items():
@@ -171,8 +173,7 @@ def calculate_metrics(models, model_paths, train_loader, test_loader, device):
         # Non-volatile storage where I place my program binary and model weights, e.g. quantized .pth
         flash = os.path.getsize(model_paths[name]) / 1024
         
-        
-        
+
         # MACs & Params (remember Multiply–Accumulate operations --> quantify the compute cost of a NN, FLOPS is about 2x MACS)
         dummy = torch.randn(1,1,28,28)
         macs, params = thop_profile(m, (dummy,)) 
@@ -189,7 +190,23 @@ def calculate_metrics(models, model_paths, train_loader, test_loader, device):
         "Params (K)": params_k,
         "Latency":    lat
         }
-    return results
+        
+        metric_dict = results
+            
+        # convert to CSV
+        rows = []
+        for model_name, m_dict in results.items():
+            row = {"model": model_name}
+            row.update(m_dict)
+            rows.append(row)
+
+        # get CSV names
+        fieldnames = ["model"] + list(next(iter(results.values())).keys())
+        with open(f"tinyml_metrics_summary.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    return 
 
 # -----  Continual learning
 def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logger, replay: bool=False, mem_size: int=200):
@@ -223,29 +240,131 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
 
 
 # -----  RAM metrics helper for continual learning
-def measure_continual(mem_func, interval=0.1):
-    # Gives peak_rss_delta (in MiB)
+def measure_sram_peak(fn, interval=0.00001):
+    """
+    Runs fn() in a background thread, samples the current process RSS
+    every `interval` seconds, and returns (peak - baseline) in MiB.
+    """
+    proc = psutil.Process(os.getpid())
+    # collect a clean baseline
+    import gc; gc.collect()
+    baseline = proc.memory_info().rss
 
-    trace = memory_usage((mem_func, ), interval=interval, retval=False)
-    base = trace[0]
-    peak = max(trace)
-    return peak - base
+    # help us know when fn() has finished
+    done = threading.Event()
+
+    def wrapper():
+        try:
+            fn()
+        finally:
+            done.set()
+
+    t = threading.Thread(target=wrapper)
+    t.start()
+
+    peak = baseline
+    while not done.is_set():
+        rss = proc.memory_info().rss
+        if rss > peak:
+            peak = rss
+        time.sleep(interval)
+
+    # one more sample after completion
+    rss = proc.memory_info().rss
+    if rss > peak:
+        peak = rss
+
+    return (peak - baseline) / (1024 * 1024)  # MiB
+
+# -----  SRAM metrics helper for saving data
+def calculate_sram(mem_delta):
+    # Save RAM usage to my own CSV
+    with open("peak_SRAM_usage.csv", "w", newline="") as fp:
+        writer = csv.writer(fp)
+        # header
+        writer.writerow(["strategy", "mem_delta_MiB"])
+        # data rows
+        writer.writerow(["SRAM", mem_delta])
+    return
 
 # -----  Calculated metrics for continual learning inspired by Towards Lifelong Deep Learning 
-def continual_learning_metrics(eval_exp,training_exp,eval_accuracy,eval_loss,forgetting):
-    for exp in eval_exp:
+def continual_learning_metrics_extended(eval_exp, train_exp, acc, forgetting, model_name = 'model'):
+    # breakpoint()
+    
+    eval_exp = np.array(eval_exp, dtype=int)
+    train_exp = np.array(train_exp, dtype=int)
+    acc = np.array(acc, dtype=float)
+    forgetting = np.array(forgetting, dtype=float)
+    
+    # number of experiences
+    K = max(eval_exp) + 1
+    
+    # create KxK matrix as the paper suggests 
+    R = np.full((K, K), np.nan, dtype=float)
+    
+    # populate R (only for valid entries where data has been seen before)
+    # i  <-- number of experiences seen  =>  training_exp (rows)
+    # j  <-- which task we eval         =>  eval_exp (cols)
+    valid_acc = (train_exp >= eval_exp)
+    R[train_exp[valid_acc ], eval_exp[valid_acc ] ] = acc[valid_acc ]
+
+    
+    final_mask = (train_exp == (K-1)) # get indices for only the accuracies after all data has been seen 
+    final_accs = acc[final_mask] 
+    avg_acc = np.nanmean(final_accs)
+
+    valid_forg = (train_exp > eval_exp)
+    avg_forg = np.nanmean(forgetting[valid_forg])
+    
+    # --- Average Incremental Accuracy A_K = 2/(K*(K+1)) * sum_{i>=j} R[i,j]
+    # mask lower triangle including diagonal
+    mask = np.tril(np.ones((K, K), dtype=bool))
+    sum_lower = np.nansum(R[mask])
+    avg_inc_acc = (2.0 / (K*(K+1))) * sum_lower
+    
+    
+
+    # --- Backward Transfer BWT = avg_{j < K} [ R[K-1,j] - R[j,j] ]
+    last_row = R[K-1, :K-1]          # R[K-1, j] for j=0..K-2
+    diagonal = np.diag(R)[:K-1]      # R[j,j] for j=0..K-2
+    bwt = np.nanmean(last_row - diagonal)
+    
+    # --- Forward Transfer FWT = avg_{i < j} [ R[i,j] - R[0,j] ]
+    # Here R[0,j] is the “initial” accuracy before training on any task
+    # We compare performance of model after task i on unseen task j>i vs that initial baseline
+    baseline = R[0, :]               # shape (K,)
+    # get indices i<j
+    tri_i, tri_j = np.triu_indices(K, k=1)
+    fwt_values   = R[tri_i, tri_j] - baseline[tri_j]
+    fwt = np.nanmean(fwt_values)
+
+    # STILL NEEd TO CALCULATE:
+    # modified_bwt = 
+    # modified_fwt = 
+    #model_size_efficiency = 
+    # sample_storage_size =
         
-        avg_acc = 
-        avg_inc_acc = 
-        avg_forgetting = 
-        intransience = 
-        bwt = 
-        fwt = 
-        modified_bwt = 
-        modified_fwt = 
-        model_size_efficiency = 
-        sample_storage_size =
-        return 
+    CL_dic = {
+        "avg_acc": avg_acc,
+        "avg_forg": avg_forg,
+        "avg_inc_acc": avg_inc_acc,
+        "fwt": fwt, 
+        "bwt": bwt,
+    }
+    
+    # Convert to CSV
+    row = {"model": model_name, **CL_dic}
+
+    # get CSV names
+    fieldnames = ["model"] + list(CL_dic.keys())
+    with open("CL_metrics_extended.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(row)
+        
+    return
+
+
 
 # Classifier head for ODL, adds down projection, relu, up projection to get some CL involved. 
 # Gets added to my quantised base model 
@@ -381,9 +500,10 @@ def main():
  
     # ----- 6. Continual learning
     scenario = SplitMNIST(n_experiences=5)
-    csv_logger = CSVLogger(log_folder="avalanche_logs_adapters")
-
-    mem_delta = measure_continual(
+    csv_logger = CSVLogger(log_folder="avalanche_logs")
+       
+    # Run Avalanche, which saves basic metrics
+    mem_delta = measure_sram_peak(
         lambda: run_continual(
             model=hybrid_model,
             trainable_params=adapter.parameters(),
@@ -392,55 +512,34 @@ def main():
             csv_logger=csv_logger,
             replay=True,
             mem_size=200
-        ), interval=0.05)
-    print(f"Replay training big RAM delta on host: {mem_delta:.1f} MiB")
+        ), interval = 0.01 )
+    print(f"Replay training RAM delta on host: {mem_delta:.1f} MiB")
     
-    with open("continual_memory_usage.csv", "w", newline="") as fp:
-        writer = csv.writer(fp)
-        # header
-        writer.writerow(["strategy", "mem_delta_MiB"])
-        # data rows
-        writer.writerow(["SRAM", mem_delta])
+    calculate_sram(mem_delta)
+    print("Saved SRAM usage to peak_SRAM_usage.csv")
     
-    print("Wrote continual_memory_usage.csv")
-    print("Continual metrics saved")
+    # Calculate my own metrics from the basic avalanche logs
+    print("Calculating extended CL metrics")
+    
+    df = pd.read_csv("avalanche_logs/eval_results.csv")
+    eval_exp      = df["eval_exp"].to_numpy(dtype=int)
+    train_exp     = df["training_exp"].to_numpy(dtype=int)
+    acc           = df["eval_accuracy"].to_numpy(dtype=float)
+    forgetting    = df["forgetting"].to_numpy(dtype=float)
     
     
-    
-    # ----- 7. Metrics 
+    continual_learning_metrics_extended(eval_exp, train_exp, acc, forgetting)
+    print("Extended CL metrics saved")
+
+    # ----- 7. Standard Metrics 
     models = {
         "FP32":        model_fp32,
         "Pruned":      model_pruned,
         "Backbone": model_quant,
         "Hybrid": hybrid_model
     }
-    metrics = calculate_metrics(models, model_paths, train_loader, test_loader, device)
-
-    quantized_metric_dict = metrics
-    
-    # Save to JSON
-    with open("quantized_metrics.json", "w") as f:
-        json.dump(quantized_metric_dict, f, indent=2)
-        
-    # convert to CSV
-    rows = []
-    for model_name, m_dict in metrics.items():
-        row = {"model": model_name}
-        row.update(m_dict)
-        rows.append(row)
-
-    # get CSV names
-    fieldnames = ["model"] + list(next(iter(metrics.values())).keys())
-    with open(f"quantized_metrics.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print("Quantized metrics saved to a quantized_metrics.csv")
-    # print(f"Static metrics:{metrics}")
-    print("Metrics saved sucessfuly")
-    
-    
+    tiny_ML_metrics(models, model_paths, train_loader, test_loader, device)
+    print("Standard tinyML metrics saved to tinyml_metrics_summary.csv")
     
 if __name__ == "__main__":
     main()
