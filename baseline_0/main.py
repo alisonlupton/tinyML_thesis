@@ -71,12 +71,12 @@ def eval_model(model, loader, device):
     model.eval()
     correct = total = 0
     with torch.no_grad():
-        for x,y in loader:
-            x,y = x.to(device), y.to(device)
+        for batch in loader:
+            x, y = batch[0].to(device), batch[1].to(device)
             preds = model(x).argmax(dim=1)
-            correct += (preds==y).sum().item()
+            correct += (preds == y).sum().item()
             total   += y.size(0)
-    return correct/total      
+    return correct / total      
           
 def prune_and_finetune(model, train_loader, device, sparsity, finetune_epochs):
     # Collect all conv and fc layers
@@ -247,6 +247,17 @@ def main():
     model_quant = quantize(model_pruned, train_loader, device)
     torch.save(model_quant.state_dict(), PRUNED_INT8_PATH)
     print(f"Model saved to {PRUNED_INT8_PATH}")
+    
+    # ----- 4.1 TEST PURE QUANTISED 
+    
+    model_quant.eval()
+    scenario = SplitMNIST(n_experiences=5)
+    for task_id, experience in enumerate(scenario.test_stream):
+        loader = DataLoader(experience.dataset, batch_size=1000)
+        acc = eval_model(model_quant, loader, device)
+        print(f"Split {task_id}: {acc*100:.2f}%")
+        
+    breakpoint()
     
     # ----- 5. Metrics 
     models = {

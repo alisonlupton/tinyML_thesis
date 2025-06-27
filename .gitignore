@@ -1,3 +1,4 @@
 # ignore tflite file
 tflite-micro/
 .venv/
+data/

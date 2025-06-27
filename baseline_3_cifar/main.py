@@ -10,7 +10,7 @@ from thop import profile as thop_profile
 from memory_profiler import memory_usage    
 import time
 import torch.nn.utils.prune as prune
-from avalanche.benchmarks import SplitMNIST
+from avalanche.benchmarks import SplitCIFAR10
 from avalanche.evaluation.metrics import accuracy_metrics, forgetting_metrics
 from avalanche.training.plugins.evaluation import EvaluationPlugin
 from avalanche.training.supervised import Naive
@@ -21,19 +21,18 @@ import numpy as np
 import pandas as pd
 import psutil
 import threading
-import math
 
 
 # -----  Base CNN Model 
 class TinyCNN(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 16, 3, padding=1) # kernel size 3, input channels 1, output channels 16
+        self.conv1 = nn.Conv2d(3, 16, 3, padding=1) # kernel size 3, input channels 3 (color), output channels 16
         self.bn1   = nn.BatchNorm2d(16)
         self.conv2 = nn.Conv2d(16, 32, 3, padding=1)  # kernel size 3, input channels 16, output channels 32
         self.bn2   = nn.BatchNorm2d(32)
-        self.fc1   = nn.Linear(32*7*7, 128)
-        self.fc2   = nn.Linear(128, num_classes) # will output 10 for MNIST
+        self.fc1   = nn.Linear(32*8*8, 128)
+        self.fc2   = nn.Linear(128, num_classes) # will output 10 for CIFAR
         # quantization stubs
         self.quant   = tq.QuantStub()
         self.dequant = tq.DeQuantStub()
@@ -45,28 +44,32 @@ class TinyCNN(nn.Module):
 
     def forward(self, x):
         x = self.quant(x)
-        x = F.relu(F.max_pool2d(self.bn1(self.conv1(x)), 2)) # size 28 --> 14 (from the max pooling)
-        x = F.relu(F.max_pool2d(self.bn2(self.conv2(x)), 2)) # size 14 --> 7 (from the max pooling)
-        x = x.flatten(start_dim=1) # flattens to (batch, 32*7*7) so we can input to fc layers
+        x = F.relu(F.max_pool2d(self.bn1(self.conv1(x)), 2)) # size 32 --> 16 (from the max pooling)
+        x = F.relu(F.max_pool2d(self.bn2(self.conv2(x)), 2)) # size 16 --> 8 (from the max pooling)
+        x = x.flatten(start_dim=1) # flattens to (batch, 32*8*8) so we can input to fc layers
         x = F.relu(self.fc1(x)) # --> (batch, 128)
         x = self.fc2(x) # --> (batch, num_classes)
         return self.dequant(x)
 
 # Define Functions 
-
 def get_data():
-    
-    common_tf = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=(0.5,), std=(0.5,)) ]) # make inputs around in [-1, 1]
-    
-    train_ds = datasets.KMNIST("./data", train=True, download=True,
-                            transform=common_tf)
-    test_ds  = datasets.KMNIST("./data", train=False, download=True,
-                            transform=common_tf)
+    CIFAR_MEAN = (0.4914, 0.4822, 0.4465)
+    CIFAR_STD  = (0.2023, 0.1994, 0.2010)
+    train_ds = datasets.CIFAR10("./data", train=True, download=True,
+    transform=transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+    ]))
+    test_ds  = datasets.CIFAR10("./data", train=False, download=True,
+    transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+    ]))     
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
     test_loader  = DataLoader(test_ds, batch_size=1000)
-    scenario = SplitMNIST(n_experiences=5, train_transform= transforms.Normalize(mean=(0.5,), std=(0.5,)) , eval_transform=transforms.Normalize(mean=(0.5,), std=(0.5,)) )
+    scenario = SplitCIFAR10(n_experiences=5)
     return train_loader, test_loader, scenario
 
 def train_on_loader(model, loader, optimizer, criterion, device, epochs):
@@ -79,27 +82,15 @@ def train_on_loader(model, loader, optimizer, criterion, device, epochs):
             loss.backward()
             optimizer.step()
 
-# -----  Eval helper for the no learning backbone testing
-def eval_model_naive(model, loader, device):
-    model.eval()
-    correct = total = 0
-    with torch.no_grad():
-        for batch in loader:
-            x, y = batch[0].to(device), batch[1].to(device)
-            probs = torch.softmax(model(x), dim=1)
-            preds = torch.multinomial(probs, num_samples=1).squeeze()
-            correct += (preds == y).sum().item()
-            total   += y.size(0)
-    return correct/total    
             
 def eval_model(model, loader, device):
     model.eval()
     correct = total = 0
     with torch.no_grad():
-        for batch in loader:
-            x, y = batch[0].to(device), batch[1].to(device)
+        for x,y in loader:
+            x,y = x.to(device), y.to(device)
             preds = model(x).argmax(dim=1)
-            correct += (preds == y).sum().item()
+            correct += (preds==y).sum().item()
             total   += y.size(0)
     return correct/total      
           
@@ -140,24 +131,6 @@ def quantize(model, test_loader, device):
             if i>=10: break
     return tq.convert(model.eval(), inplace=False)
 
-# -----  Quantisation helper to measure baseline
-def backbone_baseline(backbone_model, device):
-    baseline_head = nn.Linear(in_features=128, out_features= 10)
-    baseline_head.weight.data.zero_()
-    baseline_head.bias.data.fill_(math.log(1/10))
-    
-    for p in baseline_head.parameters():
-        p.requires_grad = False
-    hybrid_base_model = TinyMLContinualModel(backbone_model, baseline_head).to(device)
-
-    
-    hybrid_base_model.eval()
-    scenario = SplitMNIST(n_experiences=5, eval_transform=transforms.Normalize(mean=(0.5,), std=(0.5,)))
-    for task_id, experience in enumerate(scenario.test_stream):
-        loader = DataLoader(experience.dataset, batch_size=1000)
-        acc = eval_model_naive(hybrid_base_model, loader, device)
-        print(f"Split {task_id}: {acc*100:.2f}%")
-
 # -----  Metrics helper
 def peak_ram_delta(model, loader, process, device):
             # Record baseline before any inference
@@ -175,7 +148,7 @@ def peak_ram_delta(model, loader, process, device):
             return (peak - base) / 1024
 # -----  Metrics helper        
 def host_latency(model, iters=100):
-    xs = torch.randn(1,1,28,28)
+    xs = torch.randn(1,3,32,32)
     # warm-up
     for _ in range(10): model(xs)
     times = []
@@ -184,18 +157,7 @@ def host_latency(model, iters=100):
         model(xs)
         times.append(time.perf_counter()-t0)
     return (sum(times)/iters)*1e3  # ms
-# -----  Metrics helper
-def latency(m, iters=50):
-            xs = torch.randn(1,1,28,28)
-            # warm-up
-            for _ in range(10):
-                m(xs)
-            times = []
-            for _ in range(iters):
-                t0 = time.perf_counter()
-                m(xs)
-                times.append((time.perf_counter() - t0) * 1e3)
-            return sum(times)/len(times), torch.std(torch.tensor(times))
+
      
 # -----  Metrics 
 def tiny_ML_metrics(models, model_paths, train_loader, test_loader, device):  
@@ -212,7 +174,7 @@ def tiny_ML_metrics(models, model_paths, train_loader, test_loader, device):
         
 
         # MACs & Params (remember Multiply–Accumulate operations --> quantify the compute cost of a NN, FLOPS is about 2x MACS)
-        dummy = torch.randn(1,1,28,28)
+        dummy = torch.randn(1,3,32,32)
         macs, params = thop_profile(m, (dummy,)) 
         macs_m = macs / 1e6 # measured in millions/kilo
         params_k = params / 1e3 # measured in millions/kilo
@@ -258,14 +220,12 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
         "model":       model,
         "optimizer":   torch.optim.SGD(trainable_params, lr=1e-2),
         "criterion":   nn.CrossEntropyLoss(),
-        "train_mb_size": 1,
+        "train_mb_size": 2,
         "train_epochs": 1,
         "eval_mb_size": 1000,
         "device":       device,
         "evaluator":    evaluator
     }
-    
-    # note that smaller mb size in training means there is more replay, so CF is better
     
     if replay:
         strategy_args["mem_size"] = mem_size
@@ -455,10 +415,10 @@ def main():
     retrain = False # won't retrain if there is existing model, unless this is set to True
 
     # Define model paths
-    MODEL_PATH           = "kmnist_fp32.pth"
-    PRUNED_PATH          = "kmnist_pruned.pth"
-    BACKBONE     = "kmnist_backbone_int8.pth"
-    HYBRID = "k_and_mnist_hybrid.pth"
+    MODEL_PATH           = "cifar10_fp32.pth"
+    PRUNED_PATH          = "cifar10_pruned.pth"
+    BACKBONE     = "cifar10_backbone_int8.pth"
+    HYBRID = "cifar10_hybrid.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
@@ -499,6 +459,7 @@ def main():
                         nn.CrossEntropyLoss(), device, 5)
             torch.save(model_fp32.state_dict(), MODEL_PATH)
             print(f"Model saved to {MODEL_PATH}")
+              
     
     # ----- 3. Prune FP32 and retrain (currently applying unstructured pruning so I won't see benefits)
     model_pruned = TinyCNN().to(device)
@@ -520,16 +481,13 @@ def main():
                                     sparsity=0.5, finetune_epochs=3)
             torch.save(model_pruned.state_dict(), PRUNED_PATH)
             print(f"Model saved to {PRUNED_PATH}")
+            
 
     # ----- 4. PTQ (from 32 --> 8)
     model_quant = quantize(model_pruned, train_loader, device)
     torch.save(model_quant.state_dict(), BACKBONE)
     print(f"Model saved to {BACKBONE}")
     
-    
-    # ----- 4.1 TEST PURE QUANTISED
-    print('Testing only quantised backbone')
-    backbone_baseline(model_quant, device)
     
     # ----- 5. Combine PQT + classifier head
     model_quant.cpu()
@@ -542,7 +500,7 @@ def main():
     print(f"Model saved to {HYBRID}")
  
     # ----- 6. Continual learning
-    # scenario define above 
+    scenario = SplitCIFAR10(n_experiences=5)
     csv_logger = CSVLogger(log_folder="avalanche_logs")
        
     # Run Avalanche, which saves basic metrics

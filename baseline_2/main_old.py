@@ -1,3 +1,4 @@
+### ONLY HAS CONTINUAL LEARNING ON FIRST 5 CLASSES OF MNIST
 import torch
 torch.backends.quantized.engine = "qnnpack"
 import torch.nn as nn
@@ -21,7 +22,12 @@ import numpy as np
 import pandas as pd
 import psutil
 import threading
-import math
+from avalanche.benchmarks import dataset_benchmark
+from avalanche.benchmarks.scenarios.supervised import class_incremental_benchmark
+import torchvision
+from avalanche.benchmarks.datasets import MNIST
+from avalanche.benchmarks.datasets.dataset_utils import default_dataset_location
+from avalanche.benchmarks.utils import as_classification_dataset, AvalancheDataset
 
 
 # -----  Base CNN Model 
@@ -53,21 +59,34 @@ class TinyCNN(nn.Module):
         return self.dequant(x)
 
 # Define Functions 
-
 def get_data():
-    
-    common_tf = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=(0.5,), std=(0.5,)) ]) # make inputs around in [-1, 1]
-    
-    train_ds = datasets.KMNIST("./data", train=True, download=True,
-                            transform=common_tf)
-    test_ds  = datasets.KMNIST("./data", train=False, download=True,
-                            transform=common_tf)
-    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    test_loader  = DataLoader(test_ds, batch_size=1000)
-    scenario = SplitMNIST(n_experiences=5, train_transform= transforms.Normalize(mean=(0.5,), std=(0.5,)) , eval_transform=transforms.Normalize(mean=(0.5,), std=(0.5,)) )
-    return train_loader, test_loader, scenario
+        full_train_ds = datasets.MNIST("./data", train=True, download=True,
+                                transform=transforms.ToTensor())
+        full_test_ds  = datasets.MNIST("./data", train=False, download=True,
+                                transform=transforms.ToTensor())
+        
+        idx_pre_train  = [i for i,(x,y) in enumerate(full_train_ds) if y >= 5]
+        idx_post_train  = [i for i,(x,y) in enumerate(full_train_ds) if y < 5]
+        
+        idx_pre_test  = [i for i,(x,y) in enumerate(full_test_ds) if y >= 5]
+        idx_post_test  = [i for i,(x,y) in enumerate(full_test_ds) if y < 5]
+
+        pre_train_ds = torch.utils.data.Subset(full_train_ds, idx_pre_train)
+        post_train_ds = torch.utils.data.Subset(full_train_ds, idx_post_train)
+        
+        pre_test_ds = torch.utils.data.Subset(full_test_ds, idx_pre_test)
+        post_test_ds = torch.utils.data.Subset(full_test_ds, idx_post_test)
+        
+        
+        pre_train_loader = DataLoader(full_train_ds, batch_size=64, shuffle=True)
+        post_train_loader = DataLoader(post_train_ds, batch_size=64, shuffle=True)
+        post_test_loader  = DataLoader(post_test_ds, batch_size=1000)
+        full_test_loader = DataLoader(full_test_ds, batch_size=1000)
+        
+        
+
+        
+        return pre_train_loader, post_train_loader, post_test_loader, full_test_loader
 
 def train_on_loader(model, loader, optimizer, criterion, device, epochs):
     model.train()
@@ -79,27 +98,15 @@ def train_on_loader(model, loader, optimizer, criterion, device, epochs):
             loss.backward()
             optimizer.step()
 
-# -----  Eval helper for the no learning backbone testing
-def eval_model_naive(model, loader, device):
-    model.eval()
-    correct = total = 0
-    with torch.no_grad():
-        for batch in loader:
-            x, y = batch[0].to(device), batch[1].to(device)
-            probs = torch.softmax(model(x), dim=1)
-            preds = torch.multinomial(probs, num_samples=1).squeeze()
-            correct += (preds == y).sum().item()
-            total   += y.size(0)
-    return correct/total    
             
 def eval_model(model, loader, device):
     model.eval()
     correct = total = 0
     with torch.no_grad():
-        for batch in loader:
-            x, y = batch[0].to(device), batch[1].to(device)
+        for x,y in loader:
+            x,y = x.to(device), y.to(device)
             preds = model(x).argmax(dim=1)
-            correct += (preds == y).sum().item()
+            correct += (preds==y).sum().item()
             total   += y.size(0)
     return correct/total      
           
@@ -139,24 +146,6 @@ def quantize(model, test_loader, device):
             model(x.to(device))
             if i>=10: break
     return tq.convert(model.eval(), inplace=False)
-
-# -----  Quantisation helper to measure baseline
-def backbone_baseline(backbone_model, device):
-    baseline_head = nn.Linear(in_features=128, out_features= 10)
-    baseline_head.weight.data.zero_()
-    baseline_head.bias.data.fill_(math.log(1/10))
-    
-    for p in baseline_head.parameters():
-        p.requires_grad = False
-    hybrid_base_model = TinyMLContinualModel(backbone_model, baseline_head).to(device)
-
-    
-    hybrid_base_model.eval()
-    scenario = SplitMNIST(n_experiences=5, eval_transform=transforms.Normalize(mean=(0.5,), std=(0.5,)))
-    for task_id, experience in enumerate(scenario.test_stream):
-        loader = DataLoader(experience.dataset, batch_size=1000)
-        acc = eval_model_naive(hybrid_base_model, loader, device)
-        print(f"Split {task_id}: {acc*100:.2f}%")
 
 # -----  Metrics helper
 def peak_ram_delta(model, loader, process, device):
@@ -258,14 +247,12 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
         "model":       model,
         "optimizer":   torch.optim.SGD(trainable_params, lr=1e-2),
         "criterion":   nn.CrossEntropyLoss(),
-        "train_mb_size": 1,
-        "train_epochs": 1,
+        "train_mb_size": 32,
+        "train_epochs": 5,
         "eval_mb_size": 1000,
         "device":       device,
         "evaluator":    evaluator
     }
-    
-    # note that smaller mb size in training means there is more replay, so CF is better
     
     if replay:
         strategy_args["mem_size"] = mem_size
@@ -452,13 +439,13 @@ class TinyMLContinualModel(nn.Module):
 ########################################################################################################
 def main():
     
-    retrain = False # won't retrain if there is existing model, unless this is set to True
+    retrain = True # won't retrain if there is existing model, unless this is set to True
 
     # Define model paths
-    MODEL_PATH           = "kmnist_fp32.pth"
-    PRUNED_PATH          = "kmnist_pruned.pth"
-    BACKBONE     = "kmnist_backbone_int8.pth"
-    HYBRID = "k_and_mnist_hybrid.pth"
+    MODEL_PATH           = "mnist_fp32.pth"
+    PRUNED_PATH          = "mnist_pruned.pth"
+    BACKBONE     = "mnist_backbone_int8.pth"
+    HYBRID = "mnist_hybrid.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
@@ -471,7 +458,8 @@ def main():
     
     # ----- 0. Data loading
     device = torch.device("cpu")
-    train_loader, test_loader, scenario = get_data()
+    pre_train_loader, post_train_loader, post_test_loader, full_test_loader = get_data()
+    
     
     # ----- 1. Base CNN Model 
     model_fp32 = TinyCNN().to(device)
@@ -485,7 +473,7 @@ def main():
             # --- Train from scratch
             print(f"Training new model: {MODEL_PATH}")
 
-            train_on_loader(model_fp32, train_loader,
+            train_on_loader(model_fp32, pre_train_loader,
                         torch.optim.SGD(model_fp32.parameters(),lr=0.01),
                         nn.CrossEntropyLoss(), device, 5)
             torch.save(model_fp32.state_dict(), MODEL_PATH)
@@ -494,7 +482,7 @@ def main():
             # --- Train from scratch
             print(f"Training new model: {MODEL_PATH}")
 
-            train_on_loader(model_fp32, train_loader,
+            train_on_loader(model_fp32, pre_train_loader,
                         torch.optim.SGD(model_fp32.parameters(),lr=0.01),
                         nn.CrossEntropyLoss(), device, 5)
             torch.save(model_fp32.state_dict(), MODEL_PATH)
@@ -509,27 +497,23 @@ def main():
         else:
             # --- Prune and tune from scratch
             print(f"Training new model: {PRUNED_PATH}")
-            model_pruned = prune_and_finetune(model_fp32, train_loader, device,
+            model_pruned = prune_and_finetune(model_fp32, pre_train_loader, device,
                                     sparsity=0.5, finetune_epochs=3)
             torch.save(model_pruned.state_dict(), PRUNED_PATH)
             print(f"Model saved to {PRUNED_PATH}")
     else:
             # --- Prune and tune from scratch
             print(f"Training new model: {PRUNED_PATH}")
-            model_pruned = prune_and_finetune(model_fp32, train_loader, device,
+            model_pruned = prune_and_finetune(model_fp32, pre_train_loader, device,
                                     sparsity=0.5, finetune_epochs=3)
             torch.save(model_pruned.state_dict(), PRUNED_PATH)
             print(f"Model saved to {PRUNED_PATH}")
 
     # ----- 4. PTQ (from 32 --> 8)
-    model_quant = quantize(model_pruned, train_loader, device)
+    model_quant = quantize(model_pruned, pre_train_loader, device)
     torch.save(model_quant.state_dict(), BACKBONE)
     print(f"Model saved to {BACKBONE}")
     
-    
-    # ----- 4.1 TEST PURE QUANTISED
-    print('Testing only quantised backbone')
-    backbone_baseline(model_quant, device)
     
     # ----- 5. Combine PQT + classifier head
     model_quant.cpu()
@@ -542,7 +526,60 @@ def main():
     print(f"Model saved to {HYBRID}")
  
     # ----- 6. Continual learning
-    # scenario define above 
+
+    
+    datadir = default_dataset_location('mnist')
+
+    train_MNIST = MNIST(datadir, train=True, download=True)
+    test_MNIST = MNIST(datadir, train=False, download=True)
+
+    # transformations are managed by the AvalancheDataset
+    train_transforms = torchvision.transforms.ToTensor()
+    eval_transforms = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Resize((32, 32))
+    ])
+
+    # wrap datasets into Avalanche datasets
+    # notice that AvalancheDatasets have multiple transform groups
+    # `train` and `eval` are the default ones, but you can add more (e.g. replay-specific transforms)
+    train_MNIST = as_classification_dataset(
+        train_MNIST,
+        transform_groups={
+            'train': train_transforms, 
+            'eval': eval_transforms
+        }
+    )
+    test_MNIST = as_classification_dataset(
+        test_MNIST,
+        transform_groups={
+            'train': train_transforms, 
+            'eval': eval_transforms
+        }
+    )
+    
+    
+    desired_classes = [0, 1, 2, 3, 4]
+    # train_MNIST.targets is a list of ints (one per sample)
+    idx_train_0_4 = [i for i, y in enumerate(train_MNIST.targets)
+                    if y in desired_classes]
+
+    idx_test_0_4  = [i for i, y in enumerate(test_MNIST.targets)
+                    if y in desired_classes]
+
+
+
+    # subsampling is often used to create streams or replay buffers!
+    dsub_train = train_MNIST.subset(idx_train_0_4)
+    dsub_test  = test_MNIST.subset(idx_test_0_4)
+    
+    scenario = class_incremental_benchmark({'train': dsub_train, 'test': dsub_test}, num_experiences=5)
+    for exp in scenario.train_stream:
+     print(exp.current_experience, exp.classes_in_this_experience)
+    
+    for i in scenario.test_stream:
+     print(i.current_experience, i.classes_in_this_experience)
+
     csv_logger = CSVLogger(log_folder="avalanche_logs")
        
     # Run Avalanche, which saves basic metrics
@@ -581,7 +618,7 @@ def main():
         "Backbone": model_quant,
         "Hybrid": hybrid_model
     }
-    tiny_ML_metrics(models, model_paths, train_loader, test_loader, device)
+    tiny_ML_metrics(models, model_paths, post_train_loader, full_test_loader, device)
     print("Standard tinyML metrics saved to tinyml_metrics_summary.csv")
     
 if __name__ == "__main__":
