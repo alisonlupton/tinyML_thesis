@@ -239,7 +239,8 @@ def tiny_ML_metrics(models, model_paths, train_loader, test_loader, device):
 
         # get CSV names
         fieldnames = ["model"] + list(next(iter(results.values())).keys())
-        with open(f"tinyml_metrics_summary.csv", "w", newline="") as f:
+        os.makedirs("metrics", exist_ok=True)
+        with open(f"metrics/tinyml_metrics_summary.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
@@ -318,7 +319,8 @@ def measure_sram_peak(fn, interval=0.00001):
 # -----  SRAM metrics helper for saving data
 def calculate_sram(mem_delta):
     # Save RAM usage to my own CSV
-    with open("peak_SRAM_usage.csv", "w", newline="") as fp:
+    os.makedirs("metrics", exist_ok=True)
+    with open("metrics/peak_SRAM_usage.csv", "w", newline="") as fp:
         writer = csv.writer(fp)
         # header
         writer.writerow(["strategy", "mem_delta_MiB"])
@@ -396,7 +398,8 @@ def continual_learning_metrics_extended(eval_exp, train_exp, acc, forgetting, mo
 
     # get CSV names
     fieldnames = ["model"] + list(CL_dic.keys())
-    with open("CL_metrics_extended.csv", "w", newline="") as f:
+    os.makedirs("metrics", exist_ok=True)
+    with open("metrics/CL_metrics_extended.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerow(row)
@@ -452,13 +455,13 @@ class TinyMLContinualModel(nn.Module):
 ########################################################################################################
 def main():
     
-    retrain = False # won't retrain if there is existing model, unless this is set to True
+    retrain = True # won't retrain if there is existing model, unless this is set to True
 
     # Define model paths
-    MODEL_PATH           = "kmnist_fp32.pth"
-    PRUNED_PATH          = "kmnist_pruned.pth"
-    BACKBONE     = "kmnist_backbone_int8.pth"
-    HYBRID = "k_and_mnist_hybrid.pth"
+    MODEL_PATH           = "models/kmnist_fp32.pth"
+    PRUNED_PATH          = "models/kmnist_pruned.pth"
+    BACKBONE     = "models/vkmnist_backbone_int8.pth"
+    HYBRID = "models/k_and_mnist_hybrid.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
@@ -483,6 +486,7 @@ def main():
             model_fp32.load_state_dict(torch.load(MODEL_PATH))
         else:
             # --- Train from scratch
+            os.makedirs("models", exist_ok=True)
             print(f"Training new model: {MODEL_PATH}")
 
             train_on_loader(model_fp32, train_loader,
@@ -492,6 +496,7 @@ def main():
             print(f"Model saved to {MODEL_PATH}")
     else:
             # --- Train from scratch
+            os.makedirs("models", exist_ok=True)
             print(f"Training new model: {MODEL_PATH}")
 
             train_on_loader(model_fp32, train_loader,

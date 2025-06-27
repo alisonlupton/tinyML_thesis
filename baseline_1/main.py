@@ -279,12 +279,12 @@ class TinyMLContinualModel(nn.Module):
 def main():
     
     retrain = False # won't retrain if there is existing model, unless this is set to True
-
+    os.makedirs('models', exist_ok= True)
     # Define model paths
-    MODEL_PATH           = "mnist_fp32.pth"
-    PRUNED_PATH          = "mnist_pruned.pth"
-    BACKBONE     = "mnist_backbone_int8.pth"
-    HYBRID = "mnist_hybrid.pth"
+    MODEL_PATH           = "models/mnist_fp32.pth"
+    PRUNED_PATH          = "models/mnist_pruned.pth"
+    BACKBONE     = "models/mnist_backbone_int8.pth"
+    HYBRID = "vmnist_hybrid.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
@@ -398,7 +398,8 @@ def main():
     replay_mem_delta = measure_continual(profiled_replay_run, interval=0.05)
     print(f"Replay training RAM delta on host: {replay_mem_delta:.1f} MiB")
     
-    with open("continual_memory_usage.csv", "w", newline="") as fp:
+    os.makedirs("metrics", exist_ok= True)
+    with open("metrics/continual_memory_usage.csv", "w", newline="") as fp:
         writer = csv.writer(fp)
         # header
         writer.writerow(["strategy", "mem_delta_MiB"])
@@ -423,7 +424,7 @@ def main():
     quantized_metric_dict = metrics
     
     # Save to JSON
-    with open("quantized_metrics.json", "w") as f:
+    with open("metrics/quantized_metrics.json", "w") as f:
         json.dump(quantized_metric_dict, f, indent=2)
         
     # convert to CSV
@@ -435,7 +436,7 @@ def main():
 
     # get CSV names
     fieldnames = ["model"] + list(next(iter(metrics.values())).keys())
-    with open(f"quantized_metrics.csv", "w", newline="") as f:
+    with open(f"metrics/quantized_metrics.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)

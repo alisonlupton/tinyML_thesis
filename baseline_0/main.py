@@ -196,11 +196,11 @@ def run_continual(model, scenario, device, csv_logger):
 def main():
     
     retrain = False # won't retrain if there is existing model, unless this is set to True
-
+    os.makedirs("models", exist_ok=True)
     # Define model paths
-    MODEL_PATH           = "mnist_fp32.pth"
-    PRUNED_PATH          = "mnist_pruned.pth"
-    PRUNED_INT8_PATH     = "mnist_pruned_int8.pth"
+    MODEL_PATH           = "models/mnist_fp32.pth"
+    PRUNED_PATH          = "models/mnist_pruned.pth"
+    PRUNED_INT8_PATH     = "models/mnist_pruned_int8.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
@@ -270,7 +270,8 @@ def main():
     quantized_metric_dict = metrics
     
     # Save to JSON
-    with open("quantized_metrics.json", "w") as f:
+    os.makedirs("metrics", exist_ok=True)
+    with open("metrics/quantized_metrics.json", "w") as f:
         json.dump(quantized_metric_dict, f, indent=2)
         
     # convert to CSV
@@ -282,7 +283,7 @@ def main():
 
     # get CSV names
     fieldnames = ["model"] + list(next(iter(metrics.values())).keys())
-    with open(f"quantized_metrics.csv", "w", newline="") as f:
+    with open(f"metrics/quantized_metrics.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
