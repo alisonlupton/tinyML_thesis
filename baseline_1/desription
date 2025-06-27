@@ -1,9 +1,6 @@
-# Basic model with continual learning tried out. 
-PTQ and unstructured pruning (50%) still used, continuing from baseline_0, 
-but an adapter head was added. We freeze the quantized backbone and attach a tiny float-precision “adapter head”  
-(a 128→32 down + ReLU + 32→10 output) that is trainable. The metrics between the FP32 vs pruned vs quantized vs hybrid
-can be compared. Continual learning using avalanche is implemnted (5-split MNIST stream) comparing both a naïve
-rehearsal-free strategy and a replay buffer. I am interested in 1: batch size effects on learning because currently 
-a high batch size is needed to avoid CF, as well as 2: peak SRAM usage because it is too high
-
+# Basic model with CL  
+This is more a playground because the frozen backbone was trained on the entire MNIST dataset, which is cheating.
+However, good model structure set up since PTQ and unstructured pruning (50%) are used, and aditionally an 
+adapter head was added as an improvement from baseline_0.  We freeze the quantized backbone and attach a tiny float-precision “adapter head”  (a 128→32 down + ReLU + 32→10 output) that is trainable. Since the frozen backbone already performs extremly
+well on MNIST, this can be viewed to see how the adapter head does in terms of forgetting... and it does quite well. The metrics between the FP32 vs pruned vs quantized vs hybrid can be compared. Continual learning is implemnted using avalanche (5-split MNIST stream) comparing both a naïve rehearsal-free strategy and a replay buffer. Next step is to implent a proper continueal learning  settup where the model learns NEW clases.
 

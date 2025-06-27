@@ -1,5 +1,6 @@
-# Still implemented basic model with CL  
-PTQ and unstructured pruning (50%) still used, continuing from baseline_1, not much changed with the model.  
-I only measured avalanche with batch size 2, replay size 200. This achieved very good accuracy with just the basic adapter
-head and simple replay. Next steps are to try new datasets, and start implementing on tflite so that I'm able to get better 
-measurments of space. Assuming accuracy drops and space becomes an issue I will test out more complex strategies. The novel part of this baseline is nailing down the metric measurments for continual learning, found in CL_metrics_extended.csv 
+# First implementation of a CORRECT continual learning pipeline
+Train backbone on KMNIST then attatched an adapter head and performed continual learning on MNIST.
+Decent accuracy and forgetting results achieved, but forgetting can definetely be improved. 
+Next step is to measure RAM and FLASH more directly, so that more interesting implementations can be added, and I also need to see what is realistic for a train_mb size.
+Furthermore, we need to test more complex datasets, and also create baseline comparisions of trying out different
+datasets for the frozen backbones. 
