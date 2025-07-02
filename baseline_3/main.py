@@ -11,7 +11,6 @@ from memory_profiler import memory_usage
 import time
 import torch.nn.utils.prune as prune
 from avalanche.benchmarks import SplitMNIST
-from avalanche.evaluation.metrics import accuracy_metrics, forgetting_metrics
 from avalanche.training.plugins.evaluation import EvaluationPlugin
 from avalanche.training.supervised import Naive
 from avalanche.training import Replay
@@ -22,6 +21,20 @@ import pandas as pd
 import psutil
 import threading
 import math
+from avalanche.evaluation.metrics import (
+    forgetting_metrics,
+    accuracy_metrics,
+    labels_repartition_metrics,
+    loss_metrics,
+    cpu_usage_metrics,
+    timing_metrics,
+    gpu_usage_metrics,
+    ram_usage_metrics,
+    disk_usage_metrics,
+    MAC_metrics,
+    bwt_metrics,
+    forward_transfer_metrics
+)
 
 
 # -----  Base CNN Model 
@@ -246,12 +259,52 @@ def tiny_ML_metrics(models, model_paths, train_loader, test_loader, device):
             writer.writerows(rows)
     return 
 
+
+def flatten_results_to_long(results, output_path="metrics/avalanche_long_metrics.csv"):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    rows = []
+
+    for exp_idx, res_dict in enumerate(results):
+        for full_key, value in res_dict.items():
+            parts = full_key.split('/')
+            metric_name = parts[0]
+            phase       = parts[1] if len(parts) > 1 else ''
+            stream      = parts[2] if len(parts) > 2 else ''
+            task_label  = parts[3] if len(parts) > 3 else ''
+            sub_id      = parts[4] if len(parts) > 4 else ''
+
+            rows.append({
+                "Task":        task_label.replace("Task", ""),
+                "Experience":  exp_idx,
+                "Phase":       phase.replace("_phase", ""),
+                "Stream":      stream.replace("_stream", ""),
+                "Metric":      metric_name,
+                "SubID":       sub_id.replace("Exp", ""),
+                "Value":       value
+            })
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["Task", "Experience", "Phase", "Stream", "Metric", "SubID", "Value"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Saved long-format metrics to {output_path}")
+    return
+
 # -----  Continual learning
 def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logger, replay: bool=False, mem_size: int=200):
-    
+
     evaluator = EvaluationPlugin(
     accuracy_metrics(experience=True, stream=True),
     forgetting_metrics(experience=True, stream=True),
+    bwt_metrics(experience=True, stream=True),
+    ram_usage_metrics(
+            every=0.5, minibatch=True, epoch=True, experience=True, stream=True),
+    disk_usage_metrics(minibatch=True, epoch=True, experience=True, stream=True),
+    MAC_metrics(minibatch=True, epoch=True, experience=True),
     loggers=[csv_logger])
     
     StrategyCls = Replay if replay else Naive
@@ -259,12 +312,14 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
         "model":       model,
         "optimizer":   torch.optim.SGD(trainable_params, lr=1e-2),
         "criterion":   nn.CrossEntropyLoss(),
-        "train_mb_size": 1,
+        "train_mb_size": 2,
         "train_epochs": 1,
         "eval_mb_size": 1000,
         "device":       device,
         "evaluator":    evaluator
     }
+    
+
     
     # note that smaller mb size in training means there is more replay, so CF is better
     
@@ -272,10 +327,19 @@ def run_continual(model: nn.Module, trainable_params, scenario, device, csv_logg
         strategy_args["mem_size"] = mem_size
     strategy = StrategyCls(**strategy_args)
     
-    for exp in scenario.train_stream:
-        strategy.train(exp)
-        strategy.eval(scenario.test_stream)
+    results = []
+    for i, exp in enumerate(scenario.train_stream):
+        print("Start of experience: ", exp.current_experience)
+        # print("Current Classes: ", exp.classes_in_this_experience)
 
+        # test returns a dictionary with the last metric collected during
+        # evaluation on that stream
+        strategy.train(exp)
+        print("Training completed")
+        results.append(strategy.eval(scenario.test_stream))
+
+    flatten_results_to_long(results)
+    
     return evaluator
 
 
@@ -455,7 +519,7 @@ class TinyMLContinualModel(nn.Module):
 ########################################################################################################
 def main():
     
-    retrain = True # won't retrain if there is existing model, unless this is set to True
+    retrain = False # won't retrain if there is existing model, unless this is set to True
 
     # Define model paths
     os.makedirs("models", exist_ok=True)
@@ -532,8 +596,8 @@ def main():
     
     
     # ----- 4.1 TEST PURE QUANTISED
-    print('Testing only quantised backbone')
-    backbone_baseline(model_quant, device)
+    #print('Testing only quantised backbone')
+    #backbone_baseline(model_quant, device)
     
     # ----- 5. Combine PQT + classifier head
     model_quant.cpu()
