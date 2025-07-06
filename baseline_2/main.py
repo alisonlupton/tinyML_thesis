@@ -330,7 +330,6 @@ def calculate_sram(mem_delta):
 
 # -----  Calculated metrics for continual learning inspired by Towards Lifelong Deep Learning 
 def continual_learning_metrics_extended(eval_exp, train_exp, acc, forgetting, model_name = 'model'):
-    # breakpoint()
     
     eval_exp = np.array(eval_exp, dtype=int)
     train_exp = np.array(train_exp, dtype=int)
@@ -455,7 +454,7 @@ class TinyMLContinualModel(nn.Module):
 ########################################################################################################
 def main():
     
-    retrain = True # won't retrain if there is existing model, unless this is set to True
+    retrain = False # won't retrain if there is existing model, unless this is set to True
 
     # Define model paths
     os.makedirs("models", exist_ok=True)
