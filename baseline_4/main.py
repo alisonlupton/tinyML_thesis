@@ -16,11 +16,11 @@ import threading
 import math
 from collections import deque
 from torch import Tensor
-from typing import Optional
+from typing import Optional, Tuple
 from tqdm import tqdm
 import gc
 import pandas as pd 
-
+from torch.quantization import quantize_dynamic
 #### CITE https://github.com/vlomonaco/ar1-pytorch/blob/master/ar1star_lat_replay.py
 
 
@@ -72,6 +72,7 @@ class TinyMLContinualModel(nn.Module):
         """Run backbone up to just before adapter, return D-dim feature."""
         # you can factor out your quant→conv→flatten→fc1→dequant→relu
         with torch.no_grad():
+            # Access the quantized modules properly
             z = self.backbone.quant(x)
             z = F.relu(F.max_pool2d(self.backbone.bn1(self.backbone.conv1(z)), 2))
             z = F.relu(F.max_pool2d(self.backbone.bn2(self.backbone.conv2(z)), 2))
@@ -92,6 +93,9 @@ class TinyMLContinualModel(nn.Module):
             feats = torch.cat([live_feats, latent_input], dim=0)
         else:
             feats = live_feats
+        # Before calling the quantized adapter
+        feats = feats.to('cpu')
+        self.adapter = self.adapter.to('cpu')
         return self.adapter(feats)
 
 ###################################################################################################################################################
@@ -225,6 +229,7 @@ def backbone_zero_shot_baseline(backbone_model: nn.Module, device, test_loader,
     head.requires_grad_(False)
 
     model = TinyMLContinualModel(backbone_model, head).to(device)
+    
     model.eval()
 
     test_loaders = test_loader
@@ -299,7 +304,11 @@ def tiny_ML_metrics(models, model_paths, train_loader, test_loader, device):
 
         # MACs & Params (remember Multiply–Accumulate operations --> quantify the compute cost of a NN, FLOPS is about 2x MACS)
         dummy = torch.randn(1,1,28,28)
-        macs, params = thop_profile(m, (dummy,)) 
+        profile_result = thop_profile(m, (dummy,))
+        if len(profile_result) == 2:
+            macs, params = profile_result
+        else:
+            macs, params, _ = profile_result  # Handle case where thop returns 3 values
         macs_m = macs / 1e6 # measured in millions/kilo
         params_k = params / 1e3 # measured in millions/kilo
         
@@ -368,6 +377,31 @@ def flatten_results_to_long(results, output_path="metrics/avalanche_long_metrics
 
 # -----  Continual learning
 # now the training loop with latent replay
+def calibrate_feature_range(model: TinyMLContinualModel,
+                            calib_loader: DataLoader,
+                            device: torch.device,
+                            num_batches: int = 10):
+    """
+    Runs a few batches through the backbone to find the global min/max
+    of the extracted features.
+    """
+    model.eval()
+    feat_min, feat_max = float("inf"), float("-inf")
+    
+
+    with torch.no_grad():
+        for i, (x, _) in enumerate(calib_loader):
+            x = x.to(device)
+            feats = model.extract(x)             # shape (B, D)
+            b_min, b_max = feats.min().item(), feats.max().item()
+            feat_min = min(feat_min, b_min)
+            feat_max = max(feat_max, b_max)
+            if i + 1 >= num_batches:
+                break
+
+    print(f"Calibrated feature range: [{feat_min:.4f}, {feat_max:.4f}]")
+    return feat_min, feat_max
+
 def train_with_latent_replay(model: TinyMLContinualModel,
                              adapter_opt,
                              loss_fn,
@@ -376,15 +410,19 @@ def train_with_latent_replay(model: TinyMLContinualModel,
                              device,
                              replay_size,
                              live_B,
-                             replay_R):
+                             replay_R,
+                             float_adapter,
+                             quant_params: Tuple[float,int]):
     
-    
-    # accuracy collections
+    # Unpack pre computed quant values 
+    scale, zero_point = quant_params
+
+
+    # accuracy and buffer collections
     train_exp_list, eval_exp_list = [], []
     accs_list, forgettings_list = [], []
     overall_accs = []
     first_seen_accuracy = {}
-    
     feat_buf  = deque(maxlen=replay_size)
     label_buf = deque(maxlen=replay_size)
 
@@ -401,41 +439,55 @@ def train_with_latent_replay(model: TinyMLContinualModel,
                 # sample up to B replay patterns, prepare replay
                 if task_id > 0 and len(feat_buf) >= replay_R:
                     idxs = torch.randperm(len(feat_buf))[:replay_R]
-                    replay_feats = torch.stack([feat_buf[i] for i in idxs]).to(device)
-                    replay_lbls  = torch.tensor([label_buf[i] for i in idxs],
-                                                dtype=torch.long,
-                                                device=device)
+                    replay_feats_q = torch.stack([feat_buf[i] for i in idxs], dim=0).to(device)
+                    replay_lbls    = torch.tensor([label_buf[i] for i in idxs], device=device)
 
                 else:
-                    replay_feats = None
+                    replay_feats_q = None
                     replay_lbls  = None
 
-                # forward on (live + replay), split!
+                # live batch
                 x_live, y_live = x[:live_B], y[:live_B]
                 
-                # 2) compute live logits via backbone→adapter
-                live_feats   = model.extract(x_live)        # B×D
-                logits_live  = model.adapter(live_feats)    # B×C
 
-                if replay_feats is not None:
-                    replay_logits = model.adapter(replay_feats)  # R×C
-                    logits = torch.cat([logits_live, replay_logits], dim=0)
-                    y_all   = torch.cat([y_live, replay_lbls], dim=0)
+                # compute live features & quantize them on-the-fly
+                live_feats_f = model.extract(x_live)  # float32 B×D
+                # quantize → then immediately dequantize for float training
+                live_feats_q = torch.quantize_per_tensor(live_feats_f.cpu(), 
+                            scale=scale,
+                            zero_point=zero_point, dtype=torch.qint8).to(device)
+                live_feats_f_train = live_feats_q.dequantize().to(device)
+                    
+                # run the float adapter on the dequantized features
+                logits_live = float_adapter(live_feats_f_train)
+                
+                if replay_feats_q is not None:
+                    replay_feats_f_train = replay_feats_q.dequantize().to(device)
+                    logits_replay = float_adapter(replay_feats_f_train)
+                    logits = torch.cat([logits_live, logits_replay], dim=0)
+                    y_all = torch.cat([y_live, replay_lbls], dim=0)
                 else:
                     logits, y_all = logits_live, y_live
 
+                    
+
+                # loss + step
                 loss = loss_fn(logits, y_all)
                 adapter_opt.zero_grad()
                 loss.backward()
                 adapter_opt.step()
                 pbar.set_postfix(loss=loss.item())
 
-                # compute new features & stash them (on CPU)
+                # compute new features & stash them for replay buffer
                 with torch.no_grad():
-                    new_feats_live = model.extract(x_live).cpu()
-                for feat_vec, lbl in zip(new_feats_live, y_live.cpu()):
-                    feat_buf.append(feat_vec)
-                    label_buf.append(int(lbl))
+                    new_feats_f = model.extract(x_live).cpu()
+                    new_feats_q = torch.quantize_per_tensor(
+                         new_feats_f, scale=scale,
+                         zero_point=zero_point, dtype=torch.qint8)
+                    for qfeat, lbl in zip(new_feats_q, y_live.cpu()):
+                        feat_buf.append(qfeat)
+                        label_buf.append(int(lbl))
+
                     
         ################# Task t done training --> EVALUATE ################
         # 1) Overall accuracy on all seen classes
@@ -739,24 +791,14 @@ def main():
     print('Testing only quantised backbone')
     backbone_zero_shot_baseline(backbone_model= model_quant, device = device, test_loader = test_loaders)
     
-    # ----- 5. Combine PQT + classifier head
-    backbone = model_quant.cpu()
+    # ----- 5. Prepare quantization and adapter
     
-    # initialise an adapter head 
-    adapter = AdapterHead(in_features=128, num_classes=10, bottleneck=32).to(device)
-    
-    hybrid_model = TinyMLContinualModel(backbone, adapter).to(device)
-    torch.save(hybrid_model.state_dict(), HYBRID)
-    print(f"Model saved to {HYBRID}")
- 
-    # ----- 6. Continual learning
-
+    # Load dataset splits for CL model
     # Hyperparams
-    replay_size = 200
-    batch_size     = 32
-    live_B   = 1
+    replay_size = 1500
+    batch_size = 32
+    live_B = 1
     replay_R = 200    
-    # Load dataset splits 
     task_loaders_train = make_split_dataset_loaders(datasets.MNIST, "../data", 
                                             n_splits=n_splits,
                                             train = True,
@@ -765,18 +807,47 @@ def main():
                                             n_splits=n_splits,
                                             train = False,
                                             batch_size = 1000)
+    # This always stays frozen 
+    backbone = model_quant.cpu() # rename
     
+    #  Calibrate the backbone’s output range once
+    calib_loader = DataLoader(
+        ConcatDataset([ld.dataset for ld in task_loaders_train[:2]]),
+        batch_size=128, shuffle=True
+    )
+    feat_min, feat_max = calibrate_feature_range(
+        TinyMLContinualModel(backbone, AdapterHead()),  # dummy head
+        calib_loader, device, num_batches=20
+    )
+    
+    # compute the 8-bit quant params
+    qmin, qmax = -128, 127
+    scale      = (feat_max - feat_min) / float(qmax - qmin)
+    zero_point = int(qmin - feat_min/scale)
 
+    # Build tiny float adapter and its optimizer
+    float_adapter = AdapterHead(in_features=128, bottleneck=32, num_classes=10).to(device)
+    optimizer     = torch.optim.SGD(float_adapter.parameters(), lr=1e-2)
+    loss_fn       = nn.CrossEntropyLoss()
+
+ 
+    # ----- 6. Continual learning
     train_exp, eval_exp, accs, forgettings, overall_accs = train_with_latent_replay(
-        hybrid_model,
-        torch.optim.SGD(adapter.parameters(), lr=1e-2),
-        nn.CrossEntropyLoss(),
-        task_loaders_train,
-        task_loaders_test,
-        device,
+        model=TinyMLContinualModel(backbone, float_adapter),  # backbone+float head
+        adapter_opt=optimizer,
+        loss_fn=loss_fn,
+        task_loaders_train=task_loaders_train,
+        task_loaders_test=task_loaders_test,
+        device=device,
         replay_size=replay_size,
-        live_B=live_B,
-        replay_R= replay_R)
+        live_B= live_B,
+        replay_R=replay_R,
+        # here we inject the scale & zero_point so your function
+        # can quantize+dequantize on the fly
+        float_adapter=float_adapter,
+        quant_params=(scale, zero_point)
+    )
+
     print("finished CL experiences")
     
     # FIX BELOW SRAM MEASURMENT!!!
@@ -826,11 +897,10 @@ def main():
         "FP32":        model_fp32,
         "Pruned":      model_pruned,
         "Backbone": model_quant,
-        "Hybrid": hybrid_model
+        "Hybrid": TinyMLContinualModel(backbone, float_adapter)
     }
     tiny_ML_metrics(models, model_paths, base_train_loader, base_test_loader, device)
     print("Standard tinyML metrics saved to tinyml_metrics_summary.csv")
-    
 if __name__ == "__main__":
     main()
     print("Completed successfully!")
