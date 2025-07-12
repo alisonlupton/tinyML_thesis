@@ -1,2 +1,4 @@
 # Beginning novel experiments, ditching Avalanche and implementing latent replay
+Implemented a base QLR model with an adapter head, training the backbone on KMNIST and performing continual learning with MNIST.
 
+Next steps are to ensure my memory / data metrics are correct, and switch to Core50 or CIFAR10. 

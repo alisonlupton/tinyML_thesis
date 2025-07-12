@@ -19,8 +19,7 @@ from torch import Tensor
 from typing import Optional, Tuple
 from tqdm import tqdm
 import gc
-import pandas as pd 
-from torch.quantization import quantize_dynamic
+import tracemalloc
 #### CITE https://github.com/vlomonaco/ar1-pytorch/blob/master/ar1star_lat_replay.py
 
 
@@ -264,6 +263,9 @@ def peak_ram_delta(model, loader, process, device):
 
             # Return the extra memory your model+activations used, in KB
             return (peak - base) / 1024
+        
+        
+
 # -----  Metrics helper        
 def host_latency(model, iters=100):
     xs = torch.randn(1,1,28,28)
@@ -376,31 +378,38 @@ def flatten_results_to_long(results, output_path="metrics/avalanche_long_metrics
     return
 
 # -----  Continual learning
-# now the training loop with latent replay
-def calibrate_feature_range(model: TinyMLContinualModel,
-                            calib_loader: DataLoader,
+def calibrate_feature_range(backbone: nn.Module,
+                             quant_stub: tq.QuantStub,
+                             dequant_stub: tq.DeQuantStub,
+                             calib_loader: DataLoader,
                             device: torch.device,
                             num_batches: int = 10):
     """
-    Runs a few batches through the backbone to find the global min/max
-    of the extracted features.
+   "Runs a few batches through the backbone up to `fc1` to
+   find global min/max of features.
     """
-    model.eval()
+    backbone.eval()
     feat_min, feat_max = float("inf"), float("-inf")
-    
 
     with torch.no_grad():
         for i, (x, _) in enumerate(calib_loader):
             x = x.to(device)
-            feats = model.extract(x)             # shape (B, D)
+            z = quant_stub(x)
+            z = F.relu(F.max_pool2d(backbone.bn1(backbone.conv1(z)), 2))
+            z = F.relu(F.max_pool2d(backbone.bn2(backbone.conv2(z)), 2))
+            z = z.flatten(1)
+            z = backbone.fc1(z)
+            feats = dequant_stub(z)
             b_min, b_max = feats.min().item(), feats.max().item()
             feat_min = min(feat_min, b_min)
             feat_max = max(feat_max, b_max)
             if i + 1 >= num_batches:
                 break
-
+            
     print(f"Calibrated feature range: [{feat_min:.4f}, {feat_max:.4f}]")
+
     return feat_min, feat_max
+
 
 def train_with_latent_replay(model: TinyMLContinualModel,
                              adapter_opt,
@@ -423,6 +432,7 @@ def train_with_latent_replay(model: TinyMLContinualModel,
     accs_list, forgettings_list = [], []
     overall_accs = []
     first_seen_accuracy = {}
+    # store 8bit latent feature vectors + labels (for replay)
     feat_buf  = deque(maxlen=replay_size)
     label_buf = deque(maxlen=replay_size)
 
@@ -436,7 +446,13 @@ def train_with_latent_replay(model: TinyMLContinualModel,
             for x, y in pbar:
                 x, y = x.to(device), y.to(device)
 
-                # sample up to B replay patterns, prepare replay
+                # REPLAY!!!
+                # random latent replay sampling (first check we've processed at least one task)
+                if task_id > 0 and len(feat_buf) >= replay_R:
+                    idxs = torch.randperm(len(feat_buf))[:replay_R]
+                    replay_feats_q = torch.stack([feat_buf[i] for i in idxs], dim=0).to(device)
+                    replay_lbls    = torch.tensor([label_buf[i] for i in idxs], device=device)
+
                 if task_id > 0 and len(feat_buf) >= replay_R:
                     idxs = torch.randperm(len(feat_buf))[:replay_R]
                     replay_feats_q = torch.stack([feat_buf[i] for i in idxs], dim=0).to(device)
@@ -446,10 +462,11 @@ def train_with_latent_replay(model: TinyMLContinualModel,
                     replay_feats_q = None
                     replay_lbls  = None
 
-                # live batch
+                # LIVE TRAINING!!!
+                
+                # extract live batch from current minibatch 
                 x_live, y_live = x[:live_B], y[:live_B]
                 
-
                 # compute live features & quantize them on-the-fly
                 live_feats_f = model.extract(x_live)  # float32 B×D
                 # quantize → then immediately dequantize for float training
@@ -461,6 +478,7 @@ def train_with_latent_replay(model: TinyMLContinualModel,
                 # run the float adapter on the dequantized features
                 logits_live = float_adapter(live_feats_f_train)
                 
+                # if there's replay data, run that through adapter also
                 if replay_feats_q is not None:
                     replay_feats_f_train = replay_feats_q.dequantize().to(device)
                     logits_replay = float_adapter(replay_feats_f_train)
@@ -470,21 +488,16 @@ def train_with_latent_replay(model: TinyMLContinualModel,
                     logits, y_all = logits_live, y_live
 
                     
-
-                # loss + step
+                # loss + step (combine replay and live)
                 loss = loss_fn(logits, y_all)
                 adapter_opt.zero_grad()
                 loss.backward()
                 adapter_opt.step()
                 pbar.set_postfix(loss=loss.item())
 
-                # compute new features & stash them for replay buffer
+                # re‐extract live features & quantize them for buffer
                 with torch.no_grad():
-                    new_feats_f = model.extract(x_live).cpu()
-                    new_feats_q = torch.quantize_per_tensor(
-                         new_feats_f, scale=scale,
-                         zero_point=zero_point, dtype=torch.qint8)
-                    for qfeat, lbl in zip(new_feats_q, y_live.cpu()):
+                    for qfeat, lbl in zip(live_feats_q, y_live.cpu()):
                         feat_buf.append(qfeat)
                         label_buf.append(int(lbl))
 
@@ -557,7 +570,7 @@ def measure_sram_peak(fn, interval=0.00001):
     return (peak - baseline) / (1024 * 1024)  # MiB
 
 # -----  SRAM metrics helper for saving data
-def calculate_sram(mem_delta):
+def record_sram_to_csv(mem_delta):
     # Save RAM usage to my own CSV
     os.makedirs("metrics", exist_ok=True)
     with open("metrics/peak_SRAM_usage.csv", "w", newline="") as fp:
@@ -567,7 +580,48 @@ def calculate_sram(mem_delta):
         # data rows
         writer.writerow(["SRAM", mem_delta])
     return
+import torch, psutil, time, gc
+from multiprocessing import Process, Manager
+# … all your other imports …
 
+def _cl_worker(cl_args, return_dict):
+    # unpack your args exactly as you would in main()
+    model, adapter_opt, loss_fn, task_loaders_train, task_loaders_test, \
+      device, replay_size, live_B, replay_R, float_adapter, quant_params = cl_args
+
+    # (re-initialize everything in this subprocess!)
+    # e.g. rebuild your TinyMLContinualModel, optimizer, etc., or simply reuse passed objects
+    outs = train_with_latent_replay(
+        model, adapter_opt, loss_fn,
+        task_loaders_train, task_loaders_test,
+        device, replay_size, live_B, replay_R,
+        float_adapter, quant_params
+    )
+    return_dict["outs"] = outs
+
+def measure_sram_in_subprocess(cl_args, interval=0.005):
+    mgr = Manager()
+    return_dict = mgr.dict()
+
+    p = Process(target=_cl_worker, args=(cl_args, return_dict))
+    p.start()
+
+    proc = psutil.Process(p.pid)
+    baseline = peak = None
+
+    # Poll until the process exits
+    while p.is_alive():
+        rss = proc.memory_info().rss
+        if baseline is None:
+            baseline = rss
+            peak = rss
+        else:
+            peak = max(peak, rss)
+        time.sleep(interval)
+
+    p.join()
+    mem_delta = (peak - baseline) / (1024 * 1024)
+    return mem_delta, return_dict["outs"]
 
 # -----  Calculated metrics for accuracy per class CL 
 def compute_per_class_accuracy(model, loader, device):
@@ -643,6 +697,7 @@ def continual_learning_metrics_extended(eval_exp, train_exp, acc, forgetting, mo
     # modified_fwt = 
     #model_size_efficiency = 
     # sample_storage_size =
+    # AND FIX FWT
         
     CL_dic = {
         "avg_acc": avg_acc,
@@ -693,13 +748,13 @@ def main():
     os.makedirs("models", exist_ok=True)
     MODEL_PATH           = "models/kmnist_fp32.pth"
     PRUNED_PATH          = "models/kmnist_pruned.pth"
-    BACKBONE     = "models/vkmnist_backbone_int8.pth"
-    HYBRID = "models/k_and_mnist_hybrid.pth"
+    BACKBONE_PATH     = "models/vkmnist_backbone_int8.pth"
+    HYBRID_PATH = "models/k_and_mnist_hybrid.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
-        "Backbone":    BACKBONE,
-        "Hybrid": HYBRID
+        "Backbone":    BACKBONE_PATH,
+        "Hybrid": HYBRID_PATH
     }
     
 
@@ -775,8 +830,8 @@ def main():
 
     # ----- 4. PTQ (from 32 --> 8)
     model_quant = quantize(model_pruned, base_train_loader, device)
-    torch.save(model_quant.state_dict(), BACKBONE)
-    print(f"Model saved to {BACKBONE}")
+    torch.save(model_quant.state_dict(), BACKBONE_PATH)
+    print(f"Model saved to {BACKBONE_PATH}")
     
     
     # ----- 4.1 TEST PURE QUANTISED
@@ -795,10 +850,10 @@ def main():
     
     # Load dataset splits for CL model
     # Hyperparams
-    replay_size = 1500
+    replay_size = 1500 #size of the circular buffer storing past quantized feature vectors
     batch_size = 32
-    live_B = 1
-    replay_R = 200    
+    live_B = 1 # how many live samples per batch you actually learn on
+    replay_R = 200 # how many replayed features you sample (up to) each step    
     task_loaders_train = make_split_dataset_loaders(datasets.MNIST, "../data", 
                                             n_splits=n_splits,
                                             train = True,
@@ -810,29 +865,36 @@ def main():
     # This always stays frozen 
     backbone = model_quant.cpu() # rename
     
-    #  Calibrate the backbone’s output range once
+    #  Calibrate the backbone’s output range once using a small subset of MNIST task 1
     calib_loader = DataLoader(
-        ConcatDataset([ld.dataset for ld in task_loaders_train[:2]]),
-        batch_size=128, shuffle=True
+         Subset(task_loaders_train[0].dataset, list(range(200))),  # first 200 samples
+            batch_size=64, shuffle=False
     )
     feat_min, feat_max = calibrate_feature_range(
-        TinyMLContinualModel(backbone, AdapterHead()),  # dummy head
-        calib_loader, device, num_batches=20
-    )
+    backbone, backbone.quant, backbone.dequant, calib_loader, device, num_batches=20)
     
-    # compute the 8-bit quant params
+    # Compute the 8-bit quant params for float adapter
     qmin, qmax = -128, 127
     scale      = (feat_max - feat_min) / float(qmax - qmin)
     zero_point = int(qmin - feat_min/scale)
 
-    # Build tiny float adapter and its optimizer
+    # Build tiny FP32 adapter and its optimizer (trainable part)
     float_adapter = AdapterHead(in_features=128, bottleneck=32, num_classes=10).to(device)
     optimizer     = torch.optim.SGD(float_adapter.parameters(), lr=1e-2)
     loss_fn       = nn.CrossEntropyLoss()
 
  
     # ----- 6. Continual learning
-    train_exp, eval_exp, accs, forgettings, overall_accs = train_with_latent_replay(
+    hybrid_model = model=TinyMLContinualModel(backbone, float_adapter)
+    # Save combined model to be able to measure later
+    torch.save(hybrid_model.state_dict(), HYBRID_PATH)
+    print(f"Model saved to {HYBRID_PATH}")
+    
+
+    training_results = {}
+    print("Starting CL experiences")
+    def do_cl():
+        training_results['outs'] = train_with_latent_replay(
         model=TinyMLContinualModel(backbone, float_adapter),  # backbone+float head
         adapter_opt=optimizer,
         loss_fn=loss_fn,
@@ -848,25 +910,14 @@ def main():
         quant_params=(scale, zero_point)
     )
 
+    mem_delta = measure_sram_peak(do_cl, interval=0.01)
+          
+    print(f"Replay training RAM delta on host: {mem_delta:.1f} MiB")
+    record_sram_to_csv(mem_delta)
+    print("Saved SRAM usage to peak_SRAM_usage.csv")
+    
+    train_exp, eval_exp, accs, forgettings, overall_accs = training_results['outs']
     print("finished CL experiences")
-    
-    # FIX BELOW SRAM MEASURMENT!!!
-    
-    print("Starting CL experiences")
-    # def do_cl():
-    #     train_with_latent_replay(
-    #     hybrid_model,
-    #     torch.optim.SGD(adapter.parameters(), lr=1e-2),
-    #     nn.CrossEntropyLoss(),
-    #     task_loaders_train,
-    #     task_loaders_test,
-    #     device,
-    #     replay_size=rm_sz,
-    #     batch_size=B
-    #     )
-    # mem_delta = measure_sram_peak(do_cl, interval=0.01)
-    
-
             
     # First we compute standard accuracy for each class in a df and print out results
     # 1) Extended CL table:
@@ -885,19 +936,15 @@ def main():
     
     # Now we compute extended metrics and save
     continual_learning_metrics_extended(eval_exp, train_exp, accs, forgettings, model_name="Hybrid")
-      
-    ### FIX BELOW!!!
-    # print(f"Replay training RAM delta on host: {mem_delta:.1f} MiB")
-    #calculate_sram(mem_delta)
-    #print("Saved SRAM usage to peak_SRAM_usage.csv")
-    
+    print("CL extended metrics saved to CL_metrics_extended.csv")
 
     # ----- 7. Standard Metrics 
     models = {
         "FP32":        model_fp32,
         "Pruned":      model_pruned,
         "Backbone": model_quant,
-        "Hybrid": TinyMLContinualModel(backbone, float_adapter)
+        "Hybrid": hybrid_model
+        
     }
     tiny_ML_metrics(models, model_paths, base_train_loader, base_test_loader, device)
     print("Standard tinyML metrics saved to tinyml_metrics_summary.csv")
