@@ -31,11 +31,11 @@ import tracemalloc
 class TinyCNN(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 16, 3, padding=1) # kernel size 3, input channels 1, output channels 16
+        self.conv1 = nn.Conv2d(3, 16, 3, padding=1) # kernel size 3, input channels 3, output channels 16
         self.bn1   = nn.BatchNorm2d(16)
         self.conv2 = nn.Conv2d(16, 32, 3, padding=1)  # kernel size 3, input channels 16, output channels 32
         self.bn2   = nn.BatchNorm2d(32)
-        self.fc1   = nn.Linear(32*7*7, 128)
+        self.fc1   = nn.Linear(32*8*8, 128)
         self.fc2   = nn.Linear(128, num_classes) # will output 10 for MNIST
         # quantization stubs
         self.quant   = tq.QuantStub()
@@ -48,10 +48,10 @@ class TinyCNN(nn.Module):
 
     def forward(self, x):
         x = self.quant(x)
-        x = F.relu(F.max_pool2d(self.bn1(self.conv1(x)), 2)) # size 28 --> 14 (from the max pooling)
-        x = F.relu(F.max_pool2d(self.bn2(self.conv2(x)), 2)) # size 14 --> 7 (from the max pooling)
-        x = x.flatten(start_dim=1) # flattens to (batch, 32*7*7) so we can input to fc layers
-        x = F.relu(self.fc1(x)) # --> (batch, 128)
+        x = F.relu(F.max_pool2d(self.bn1(self.conv1(x)), 2)) # size 32 --> 16 (from the max pooling)
+        x = F.relu(F.max_pool2d(self.bn2(self.conv2(x)), 2)) # size 16 --> 8 (from the max pooling)
+        x = x.flatten(start_dim=1) # flattens to (batch, 32*8*8) so we can input to fc layers
+        x = F.relu(self.fc1(x)) # --> (batch, 128) # 128 comes from my linear def. 
         x = self.fc2(x) # --> (batch, num_classes)
         return self.dequant(x)
     
@@ -100,14 +100,23 @@ class TinyMLContinualModel(nn.Module):
 ###################################################################################################################################################
 ############################################################### Define Functions ##################################################################
 ###################################################################################################################################################
+def load_dataset(dataset_cls, training, transform):
+    # 1) Load full set
+    full_ds = dataset_cls(
+        "../data",
+        train=training,
+        download=True,
+        transform=transform
+    )
+
+    
+    return full_ds
 
 def make_split_dataset_loaders(
-    dataset_cls,
-    root,
+    full_ds,
     n_splits=5,
     train: bool = False,
     batch_size: int = 1000,
-    normalize=True,
 ):
     """
     Partition any torchvision dataset (e.g. KMNIST) into `n_splits` tasks,
@@ -115,13 +124,8 @@ def make_split_dataset_loaders(
       split 0 -> labels {0,1}, split 1 -> {2,3}, …, split 4 -> {8,9}.
     Returns a list of DataLoaders over those subsets.
     """
-    tf = [transforms.ToTensor()]
-    if normalize:
-        tf.append(transforms.Normalize((0.5,), (0.5,)))
-    full_ds = dataset_cls(root, train=train, download=True,
-                          transform=transforms.Compose(tf))
 
-    per_split = 10 // n_splits
+    per_split = len(set(full_ds.targets))  // n_splits
     loaders = []
     for split_id in range(n_splits):
         lo = split_id * per_split
@@ -143,28 +147,25 @@ def train_on_loader(model, loader, optimizer, criterion, device, epochs):
             optimizer.step()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
             
-# ----- Helper for Dataloaders
-def concat_loaders(loaders):
-    datasets = [loader.dataset for loader in loaders]
-    return DataLoader(
-        ConcatDataset(datasets),
-        batch_size=loaders[0].batch_size,
-        shuffle=False
-    )
-    
-# -----  Eval helper for the no learning backbone testing
-def eval_model_naive(model, loader, device):
-    model.eval()
+# -----  Evaluator for CL model where classes must be filtered
+def eval_continual_model(model, loader, seen_labels, device):
+    model = model.to(device).eval()
     correct = total = 0
-    with torch.no_grad():
-        for batch in loader:
-            x, y = batch[0].to(device), batch[1].to(device)
-            probs = torch.softmax(model(x), dim=1)
-            preds = torch.multinomial(probs, num_samples=1).squeeze()
+    seen_labels = torch.tensor(seen_labels, device=device)
+
+    with torch.inference_mode():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            logits = model(x)                         # shape (B,100)
+            # create a -inf mask, then fill seen positions from logits
+            mask = torch.full_like(logits, float("-inf"))
+            mask[:, seen_labels] = logits[:, seen_labels]
+            preds = mask.argmax(dim=1)
             correct += (preds == y).sum().item()
             total   += y.size(0)
-    return correct/total    
-            
+
+    return correct / total 
+# ----- Evaluator for standard backbone model
 def eval_model(model, loader, device):
     model.eval()
     correct = total = 0
@@ -214,40 +215,42 @@ def quantize(model, test_loader, device):
     return tq.convert(model.eval(), inplace=False)
 
 # -----  Helper to measure zero-shot baseline accuracy of the frozen, quantized backbone on a new dataset
-def backbone_zero_shot_baseline(backbone_model: nn.Module, device, test_loader,
-                                num_splits: int = 5
+def backbone_zero_shot_baseline(backbone_model: nn.Module, device, test_loader, full_test_dataset,
+                                num_splits
                                 ):
     """
     Build a zero‐trained head on top of your frozen backbone, and
     evaluate it on each of the "SplitMNIST" splits defined above.
     """
     # head that predicts uniformly at random (logits all equal)
-    head = nn.Linear(in_features=128, out_features=10, bias=True)
+    # full 100-way uniform head
+    num_classes = len(full_test_dataset.classes)
+    head = nn.Linear(128, num_classes, bias=True)
     head.weight.data.zero_()
-    head.bias.data.fill_(math.log(1/10))
+    head.bias.data.fill_(math.log(1/num_classes))
     head.requires_grad_(False)
 
-    model = TinyMLContinualModel(backbone_model, head).to(device)
-    
-    model.eval()
+    cl_model = TinyMLContinualModel(backbone_model, head).to(device).eval()
 
-    test_loaders = test_loader
+    for task_id, loader in enumerate(test_loader):
+        # compute which labels belong to this split
+        per_split = num_classes // len(test_loader)
+        lo = task_id * per_split
+        hi = lo + per_split
+        mask = torch.full((num_classes,), float("-inf"), device=device)
+        mask[lo:hi] = 0.0
 
-    
-
-    for task_id, loader in enumerate(test_loaders):
-        correct = 0
-        total = 0
+        correct = total = 0
         with torch.no_grad():
             for x, y in loader:
                 x, y = x.to(device), y.to(device)
-                # your eval_model_naive just samples uniformly
-                probs = torch.softmax(model(x), dim=1)
-                preds = torch.multinomial(probs, num_samples=1).squeeze()
+                logits = cl_model(x)          # shape [B,100]
+                masked = logits + mask        # unseen classes stay at -inf
+                preds = masked.argmax(dim=1)
                 correct += (preds == y).sum().item()
                 total   += y.size(0)
-        print(f"Zero‐shot on split {task_id}: {correct/total*100:.2f}%")
 
+        print(f"Zero‐shot on split {task_id}: {100*correct/total:.2f}%")
 # -----  Metrics helper
 def peak_ram_delta(model, loader, process, device):
             # Record baseline before any inference
@@ -268,7 +271,7 @@ def peak_ram_delta(model, loader, process, device):
 
 # -----  Metrics helper        
 def host_latency(model, iters=100):
-    xs = torch.randn(1,1,28,28)
+    xs = torch.randn(1,3,32,32)
     # warm-up
     for _ in range(10): model(xs)
     times = []
@@ -277,19 +280,6 @@ def host_latency(model, iters=100):
         model(xs)
         times.append(time.perf_counter()-t0)
     return (sum(times)/iters)*1e3  # ms
-# -----  Metrics helper
-def latency(m, iters=50):
-            xs = torch.randn(1,1,28,28)
-            # warm-up
-            for _ in range(10):
-                m(xs)
-            times = []
-            for _ in range(iters):
-                t0 = time.perf_counter()
-                m(xs)
-                times.append((time.perf_counter() - t0) * 1e3)
-            return sum(times)/len(times), torch.std(torch.tensor(times))
-     
 # -----  Metrics 
 def tiny_ML_metrics(models, model_paths, test_loader, device):  
     proc = psutil.Process(os.getpid())
@@ -305,7 +295,7 @@ def tiny_ML_metrics(models, model_paths, test_loader, device):
         
 
         # MACs & Params (remember Multiply–Accumulate operations --> quantify the compute cost of a NN, FLOPS is about 2x MACS)
-        dummy = torch.randn(1,1,28,28)
+        dummy = torch.randn(1,3, 32, 32)
         profile_result = thop_profile(m, (dummy,))
         if len(profile_result) == 2:
             macs, params = profile_result
@@ -342,40 +332,6 @@ def tiny_ML_metrics(models, model_paths, test_loader, device):
         writer.writerows(rows)
     return 
 
-
-def flatten_results_to_long(results, output_path="metrics/avalanche_long_metrics.csv"):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    rows = []
-
-    for exp_idx, res_dict in enumerate(results):
-        for full_key, value in res_dict.items():
-            parts = full_key.split('/')
-            metric_name = parts[0]
-            phase       = parts[1] if len(parts) > 1 else ''
-            stream      = parts[2] if len(parts) > 2 else ''
-            task_label  = parts[3] if len(parts) > 3 else ''
-            sub_id      = parts[4] if len(parts) > 4 else ''
-
-            rows.append({
-                "Task":        task_label.replace("Task", ""),
-                "Experience":  exp_idx,
-                "Phase":       phase.replace("_phase", ""),
-                "Stream":      stream.replace("_stream", ""),
-                "Metric":      metric_name,
-                "SubID":       sub_id.replace("Exp", ""),
-                "Value":       value
-            })
-
-    with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["Task", "Experience", "Phase", "Stream", "Metric", "SubID", "Value"]
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(f"Saved long-format metrics to {output_path}")
-    return
 
 # -----  Continual learning
 def calibrate_feature_range(backbone: nn.Module,
@@ -421,6 +377,7 @@ def train_with_latent_replay(model: TinyMLContinualModel,
                              live_B,
                              replay_R,
                              float_adapter,
+                             full_test_ds,
                              quant_params: Tuple[float,int]):
     
     # Unpack pre computed quant values 
@@ -441,7 +398,7 @@ def train_with_latent_replay(model: TinyMLContinualModel,
         # 1) train on this new experience
         print(f"\n=== Training on Task {task_id} ===")
         model.train()
-        for epoch in range(1):
+        for epoch in range(15):
             pbar = tqdm(train_loader, desc=f"Task {task_id}", unit="batch", leave=False)
             for x, y in pbar:
                 x, y = x.to(device), y.to(device)
@@ -505,11 +462,20 @@ def train_with_latent_replay(model: TinyMLContinualModel,
         ################# Task t done training --> EVALUATE ################
         # 1) Overall accuracy on all seen classes
         eval_bs = live_B + replay_R
+        # build a single dataset containing all test splits up to task_id
         seen_dataset = ConcatDataset([ld.dataset for ld in task_loaders_test[: task_id+1]])
-        seen_loader  = DataLoader(seen_dataset, batch_size=eval_bs)
-        overall = eval_model(model, seen_loader, device)
+        seen_loader  = DataLoader(seen_dataset, batch_size=eval_bs, shuffle=False)
+        
+        #extract the list of labels in that dataset
+        all_targets = full_test_ds.targets  # the full 100-class list
+        seen_indices = []
+        for loader in task_loaders_test[: task_id+1]:
+            seen_indices.extend(loader.dataset.indices)
+        seen_labels = sorted({ all_targets[i] for i in seen_indices })
+
+        overall = eval_continual_model(model, seen_loader, seen_labels, device)
         overall_accs.append((task_id, overall))
-        print(f"After Task {task_id}: overall accuracy = {overall:.4f}")
+        print(f"After Task {task_id}: overall accuracy on seen labels = {overall:.4f}")
         
         # 2) Per-split accuracy and forgetting
         for j in range(task_id+1):
@@ -580,67 +546,7 @@ def record_sram_to_csv(mem_delta):
         # data rows
         writer.writerow(["SRAM", mem_delta])
     return
-import torch, psutil, time, gc
-from multiprocessing import Process, Manager
-# … all your other imports …
 
-def _cl_worker(cl_args, return_dict):
-    # unpack your args exactly as you would in main()
-    model, adapter_opt, loss_fn, task_loaders_train, task_loaders_test, \
-      device, replay_size, live_B, replay_R, float_adapter, quant_params = cl_args
-
-    # (re-initialize everything in this subprocess!)
-    # e.g. rebuild your TinyMLContinualModel, optimizer, etc., or simply reuse passed objects
-    outs = train_with_latent_replay(
-        model, adapter_opt, loss_fn,
-        task_loaders_train, task_loaders_test,
-        device, replay_size, live_B, replay_R,
-        float_adapter, quant_params
-    )
-    return_dict["outs"] = outs
-
-def measure_sram_in_subprocess(cl_args, interval=0.005):
-    mgr = Manager()
-    return_dict = mgr.dict()
-
-    p = Process(target=_cl_worker, args=(cl_args, return_dict))
-    p.start()
-
-    proc = psutil.Process(p.pid)
-    baseline = peak = None
-
-    # Poll until the process exits
-    while p.is_alive():
-        rss = proc.memory_info().rss
-        if baseline is None:
-            baseline = rss
-            peak = rss
-        else:
-            peak = max(peak, rss)
-        time.sleep(interval)
-
-    p.join()
-    mem_delta = (peak - baseline) / (1024 * 1024)
-    return mem_delta, return_dict["outs"]
-
-# -----  Calculated metrics for accuracy per class CL 
-def compute_per_class_accuracy(model, loader, device):
-    model.eval()
-    class_correct = {}
-    class_total = {}
-    with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            preds = model(x).argmax(dim=1)
-            for p, t in zip(preds.cpu(), y.cpu()):
-                class_correct.setdefault(int(t), 0)
-                class_total.setdefault(int(t), 0)
-                if int(p) == int(t):
-                    class_correct[int(t)] += 1
-                class_total[int(t)] += 1
-    return {c: class_correct[c] / class_total[c] 
-            for c in sorted(class_total) if class_total[c] > 0}
-        
 # -----  Calculated metrics for continual learning inspired by Towards Lifelong Deep Learning 
 def continual_learning_metrics_extended(eval_exp, train_exp, acc, forgetting, model_name = 'model'):
 
@@ -746,10 +652,10 @@ def main():
 
     # Define model paths
     os.makedirs("models", exist_ok=True)
-    MODEL_PATH           = "models/kmnist_fp32.pth"
-    PRUNED_PATH          = "models/kmnist_pruned.pth"
-    BACKBONE_PATH     = "models/vkmnist_backbone_int8.pth"
-    HYBRID_PATH = "models/k_and_mnist_hybrid.pth"
+    MODEL_PATH           = "models/cifar10.pth"
+    PRUNED_PATH          = "models/cifar10_fp32.pth"
+    BACKBONE_PATH     = "models/cifar10_backboneint8.pth"
+    HYBRID_PATH = "models/cifar100_hybrid.pth"
     model_paths = {
         "FP32":           MODEL_PATH,
         "Pruned":         PRUNED_PATH,
@@ -762,26 +668,37 @@ def main():
     
     # ----- 0. Data loading
     device = torch.device("cpu")
-    base_train_ds = datasets.KMNIST("../data", train=True, download=True,
-                               transform=transforms.Compose([
-                                 transforms.ToTensor(),
-                                 transforms.Normalize((0.5,), (0.5,))]))
-    base_test_ds  = datasets.KMNIST("../data", train=False, download=True,
-                               transform=transforms.Compose([
-                                 transforms.ToTensor(),
-                                 transforms.Normalize((0.5,), (0.5,))]))
     
-    # These below will be used later for CL testing 
-    full_test_ds = datasets.MNIST("../data", train=False, download=True,
-                              transform=transforms.Compose([
-                                  transforms.ToTensor(),
-                                  transforms.Normalize((0.5,), (0.5,))]))
-    full_test_loader = DataLoader(full_test_ds, batch_size=1000, shuffle=False)
-    
+    # transforms
+    train_transform = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465),
+                         (0.2470, 0.2435, 0.2616))
+    ])
+
+    test_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465),
+                            (0.2470, 0.2435, 0.2616))
+    ])
+
+    # backbone training datasets
+    base_train_ds = load_dataset(datasets.CIFAR10, True, train_transform)
+    base_test_ds  = load_dataset(datasets.CIFAR10, False, test_transform)
     base_train_loader = DataLoader(base_train_ds, batch_size=64, shuffle=True)
     base_test_loader  = DataLoader(base_test_ds,  batch_size=1000, shuffle=False)
+
+    
+    # These below will be used later for CL testing 
+    full_train_ds = load_dataset(datasets.CIFAR100, True, train_transform)
+    full_test_ds = load_dataset(datasets.CIFAR100, False, test_transform)
+    full_test_loader = DataLoader(full_test_ds, batch_size=1000, shuffle=False)
+    
+    
     # ----- 1. Base CNN Model 
-    model_fp32 = TinyCNN().to(device)
+    model_fp32 = TinyCNN(num_classes=10).to(device)
     
     # ----- 2 Train FP32 and save
     if not retrain:
@@ -832,43 +749,44 @@ def main():
     model_quant = quantize(model_pruned, base_train_loader, device)
     torch.save(model_quant.state_dict(), BACKBONE_PATH)
     print(f"Model saved to {BACKBONE_PATH}")
+    test = eval_model(model_quant, base_test_loader, device)
+    print(f"BACKBONE ACC on CIFAR10; {test}")
+
     
     
     # ----- 4.1 TEST PURE QUANTISED
     n_splits = 5
-    # get split to simulate CL 
-    test_loaders = make_split_dataset_loaders(
-    datasets.MNIST, "../data",
+    # get split to simulate CL (make_split_dataset_loaders takes in a dataset)
+    task_loaders_test = make_split_dataset_loaders(
+    full_test_ds,
     n_splits=n_splits,
     train=False,
     batch_size=1000
     )
+    
     print('Testing only quantised backbone')
-    backbone_zero_shot_baseline(backbone_model= model_quant, device = device, test_loader = test_loaders)
+    backbone_zero_shot_baseline(backbone_model= model_quant, device = device, test_loader = task_loaders_test, full_test_dataset=full_test_ds,num_splits= n_splits)
     
     # ----- 5. Prepare quantization and adapter
     
     # Load dataset splits for CL model
     # Hyperparams
-    replay_size = 1500 #size of the circular buffer storing past quantized feature vectors
-    batch_size = 32
-    live_B = 1 # how many live samples per batch you actually learn on
-    replay_R = 200 # how many replayed features you sample (up to) each step    
-    task_loaders_train = make_split_dataset_loaders(datasets.MNIST, "../data", 
-                                            n_splits=n_splits,
-                                            train = True,
-                                            batch_size = batch_size)
-    task_loaders_test = make_split_dataset_loaders(datasets.MNIST, "../data", 
-                                            n_splits=n_splits,
-                                            train = False,
-                                            batch_size = 1000)
+    replay_size = 1000 #size of the circular buffer storing past quantized feature vectors
+    live_B = 16 # how many live samples per batch you actually learn on
+    replay_R = 100 # how many replayed features you sample (up to) each step    
+    task_loaders_train = make_split_dataset_loaders(
+        full_train_ds,
+        n_splits=n_splits,
+        train=True,
+        batch_size=32   
+        )
     # This always stays frozen 
     backbone = model_quant.cpu() # rename
     
-    #  Calibrate the backbone’s output range once using a small subset of MNIST task 1
+    #  Calibrate the backbone’s output range once using a small subset of CORE50 task 1
     calib_loader = DataLoader(
          Subset(task_loaders_train[0].dataset, list(range(200))),  # first 200 samples
-            batch_size=64, shuffle=False
+            batch_size=32, shuffle=False
     )
     feat_min, feat_max = calibrate_feature_range(
     backbone, backbone.quant, backbone.dequant, calib_loader, device, num_batches=20)
@@ -879,13 +797,13 @@ def main():
     zero_point = int(qmin - feat_min/scale)
 
     # Build tiny FP32 adapter and its optimizer (trainable part)
-    float_adapter = AdapterHead(in_features=128, bottleneck=32, num_classes=10).to(device)
+    float_adapter = AdapterHead(in_features=128, bottleneck=32, num_classes=100).to(device)
     optimizer     = torch.optim.SGD(float_adapter.parameters(), lr=1e-2)
     loss_fn       = nn.CrossEntropyLoss()
 
  
     # ----- 6. Continual learning
-    hybrid_model = model=TinyMLContinualModel(backbone, float_adapter)
+    hybrid_model = TinyMLContinualModel(backbone, float_adapter)
     # Save combined model to be able to measure later
     torch.save(hybrid_model.state_dict(), HYBRID_PATH)
     print(f"Model saved to {HYBRID_PATH}")
@@ -895,7 +813,7 @@ def main():
     print("Starting CL experiences")
     def do_cl():
         training_results['outs'] = train_with_latent_replay(
-        model=TinyMLContinualModel(backbone, float_adapter),  # backbone+float head
+        hybrid_model,  # backbone+float head
         adapter_opt=optimizer,
         loss_fn=loss_fn,
         task_loaders_train=task_loaders_train,
@@ -907,6 +825,7 @@ def main():
         # here we inject the scale & zero_point so your function
         # can quantize+dequantize on the fly
         float_adapter=float_adapter,
+        full_test_ds = full_test_ds,
         quant_params=(scale, zero_point)
     )
 
