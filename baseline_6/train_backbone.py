@@ -27,6 +27,19 @@ args = parser.parse_args()
 
 CLASSES = 200  # TinyImageNet has 200 classes
 
+
+
+# Download
+#wget -O tiny-imagenet-200.zip https://cs231n.stanford.edu/tiny-imagenet-200.zip
+
+# Unzip
+#unzip -q tiny-imagenet-200.zip
+
+# Verify
+#ls tiny-imagenet-200
+
+# python train_backbone.py --data /path/to/tiny-imagenet-200
+
 # logging
 os.makedirs('log', exist_ok=True)
 logging.basicConfig(
@@ -40,6 +53,7 @@ fh.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
 logging.getLogger().addHandler(fh)
 
 def main():
+
     # 1) Device + cudnn
     if not torch.cuda.is_available():
         print("ERROR: CUDA is required.")
@@ -137,7 +151,10 @@ def main():
             'best_top1_acc': best_acc,
             'optimizer': optimizer.state_dict(),
         }, is_best, args.save)
-
+    final_path = os.path.join(args.save, 'final_model.pth')
+    torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
+            final_path)
+    logging.info("Saved final model weights to %s", final_path)
     logging.info("Done. Best validation acc: %.2f", best_acc)
 
 
