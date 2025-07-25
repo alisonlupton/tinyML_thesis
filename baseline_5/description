@@ -1,3 +1,2 @@
-# Continuation of Baseline4, but training on a subset of Core50, and then evaluating on the entire dataset. 
-
-TODO: transfer to tflite to get measuremtn, make CNN more general!
+# Continuation of Baseline4, but training on cifar10, and then evaluating on cifar100. 
+Next step is implementing BNN paper!
