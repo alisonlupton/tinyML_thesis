@@ -1,0 +1,3 @@
+# Implementation of BNN paper
+Using CIFAR10 and CIFAR100 dataset
+backbone is birealnet, but I should experiment with more modern ones later
