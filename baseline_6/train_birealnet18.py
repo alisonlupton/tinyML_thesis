@@ -10,7 +10,7 @@ import torch.backends.cudnn as cudnn
 from torchvision import datasets, transforms
 
 from utils import *
-from birealnet import birealnet18
+from baseline_6.birealnet18 import birealnet18
 
 parser = argparse.ArgumentParser("birealnet")
 parser.add_argument('--batch_size',   type=int,   default=512)

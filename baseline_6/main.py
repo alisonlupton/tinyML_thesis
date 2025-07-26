@@ -18,9 +18,13 @@ from collections import deque
 from typing import Tuple
 from tqdm import tqdm
 import gc
-from birealnet import birealnet18
+from baseline_6.quicknet import QuickNet
 from datasets import load_dataset
 from torch.utils.data import Dataset
+from PIL import Image
+from torchvision.datasets import ImageFolder
+import pandas as pd
+from pathlib import Path
 from PIL import Image
 
 #### CITE https://github.com/vlomonaco/ar1-pytorch/blob/master/ar1star_lat_replay.py
@@ -57,7 +61,34 @@ class HFDataset(Dataset):
 
         label = item["label"]
         return img, label
+    
+class TinyValDataset(Dataset):
+    def __init__(self, root, transform=None):
+        root = Path(root)
+        ann_path = "../data/tiny-imagenet-200/val/val_annotations.txt"
+        # Six columns: image, class, x_min, y_min, x_max, y_max
+        ann = pd.read_csv(
+            ann_path,
+            sep="\t",
+            header=None,
+            names=["img","cls","xmin","ymin","xmax","ymax"]
+        )
+        # Build a class→index map
+        classes = sorted(set(ann.cls))
+        self.class_to_idx = {c:i for i,c in enumerate(classes)}
+        # Store image file paths and integer labels
+        self.imgs = [root/"images"/img_name for img_name in ann.img]
+        self.targets = [self.class_to_idx[c] for c in ann.cls]
+        self.transform = transform
 
+    def __len__(self):
+        return len(self.imgs)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.imgs[idx]).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        return img, self.targets[idx]
 
 ###################################################################################################################################################
 ############################################################### Define Functions ##################################################################
@@ -71,7 +102,6 @@ def load_dataset_custom(dataset_cls, training, transform):
         transform=transform
     )
 
-    
     return full_ds
 
 def make_split_dataset_loaders(
@@ -129,14 +159,16 @@ def eval_continual_model(model, loader, seen_labels, device):
     return correct / total 
 # ----- Evaluator for standard backbone model
 def eval_model(model, loader, device):
+    print("starting eval")
     model.eval()
     correct = total = 0
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc ="evaluating..", unit="batch", ):
             x, y = batch[0].to(device), batch[1].to(device)
             preds = model(x).argmax(dim=1)
             correct += (preds == y).sum().item()
             total   += y.size(0)
+            print(f"Current accuracy: {correct/total}")
     return correct/total      
           
 def prune_and_finetune(model, train_loader, device, sparsity, finetune_epochs):
@@ -644,11 +676,18 @@ def main():
     transforms.Normalize(mean=[0.5]*3,
                 std=[0.5]*3),
 ])
-
-
-    tinyimagenet_train = load_dataset("zh-plus/tiny-imagenet", split = 'train')
-    tinyimagenet_test   = load_dataset("zh-plus/tiny-imagenet", split= 'valid')
     
+    tiny_transform_val = transforms.Compose([
+    transforms.Resize(64),                   # ensure 64×64
+    transforms.CenterCrop(64),    # no data aug
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.4802, 0.4481, 0.3975],       # TinyImageNet stats
+        std=[0.2302, 0.2265, 0.2262]
+    ),
+])
+
+        
     cifar10_full_train = load_dataset_custom(datasets.CIFAR10, True, train_transform)
     cifar10_full_test  = load_dataset_custom(datasets.CIFAR10, False, test_transform)
     cifar10_train_loader = DataLoader(cifar10_full_train, batch_size=64, shuffle=True)
@@ -659,57 +698,33 @@ def main():
     cifar100_train_loader = DataLoader(cifar100_full_train, batch_size=64, shuffle=True)
     cifar100_test_loader  = DataLoader(cifar100_full_test,  batch_size=1000, shuffle=False)
 
-    
-    tiny_train = HFDataset(tinyimagenet_train, transform=train_transform)
-    tiny_train_loader = DataLoader(tiny_train, batch_size=64, shuffle=True, num_workers=4)
-
-    tiny_test = HFDataset(tinyimagenet_test, transform=test_transform)
-    tiny_test_loader = DataLoader(tiny_test, batch_size=64, shuffle=False, num_workers=4)
+    tiny_test = TinyValDataset(root="../data/tiny-imagenet-200/test", transform=tiny_transform_val)
+    tiny_test_loader = DataLoader(tiny_test, batch_size=16, shuffle=False, num_workers=0, pin_memory=False)
 
     # ----- 1. Base BNN Model, training on tinyimagenet
-    backbone = birealnet18(num_classes=200).to(device)
+    backbone = QuickNet(num_classes=200).to(device)
     
-    # ----- 2. Train backbone and save
-    if not retrain:
-        if os.path.exists(BACKBONE_PATH):
-            print(f"Found existing model at {BACKBONE_PATH}, skipping training.")
-            backbone.load_state_dict(torch.load(BACKBONE_PATH))
-        else:
-            # --- Train from scratch
-            print(f"Training new model: {BACKBONE_PATH}")
 
-            train_on_loader(backbone, tiny_train_loader,
-                        torch.optim.SGD(backbone.parameters(),lr=0.01),
-                        nn.CrossEntropyLoss(), device, 5)
-            torch.save(backbone.state_dict(), BACKBONE_PATH)
-            print(f"Model saved to {BACKBONE_PATH}")
+    # ----- 2. Load pretrained Backbone
+    if os.path.exists(BACKBONE_PATH):
+        print(f"Loading trained model from {BACKBONE_PATH},")
+        backbone.load_state_dict(BACKBONE_PATH, map_location=torch.device('cpu'))
+        
+        # change to match CIFAR10 classes
+        backbone.classifier = nn.Linear(backbone.classifier.in_features, 10)        
+        print("Loaded backbone")
+
     else:
-            # --- Train from scratch
-            print(f"Training new model: {BACKBONE_PATH}")
+        # --- Train from scratch
+        print("Couldn't find trained model. Please check.")
 
-            train_on_loader(backbone, tiny_train_loader,
-                        torch.optim.SGD(backbone.parameters(),lr=0.01),
-                        nn.CrossEntropyLoss(), device, 5)
-            torch.save(backbone.state_dict(), BACKBONE_PATH)
-            print(f"Model saved to {BACKBONE_PATH}")
-            
     # ----- 3. Test backbone 
-    eval_model(backbone, tiny_test_loader)
+    print('starting evaluation')
+    eval_model(backbone, tiny_test_loader, device)
     
     breakpoint()
-    # ----- 4.1 TEST PURE QUANTISED
-    n_splits = 5
-    # get split to simulate CL (make_split_dataset_loaders takes in a dataset)
-    task_loaders_test = make_split_dataset_loaders(
-    full_test_ds,
-    n_splits=n_splits,
-    train=False,
-    batch_size=1000
-    )
-    
-    print('Testing only quantised backbone')
-    backbone_zero_shot_baseline(backbone_model= model_quant, device = device, test_loader = task_loaders_test, full_test_dataset=full_test_ds,num_splits= n_splits)
-    
+    # ----- 4.
+
     # ----- 5. Prepare quantization and adapter
     
     # Load dataset splits for CL model
