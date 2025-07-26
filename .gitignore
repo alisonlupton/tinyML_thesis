@@ -1,5 +1,5 @@
 .venv/
 data/
 baseline_6/tiny-imagenet-200.zip
-babaseline_6/models/tinyimagenet.pth
+baseline_6/models/tinyimagenet.pth
 
