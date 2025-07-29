@@ -1,149 +1,104 @@
-import os
-import sys
-import shutil
-import numpy as np
-import time, datetime
+
 import torch
-import random
-import logging
-import argparse
-import torch.nn as nn
-import torch.utils
-import torchvision.datasets as dset
-import torchvision.transforms as transforms
-import torch.backends.cudnn as cudnn
+torch.backends.quantized.engine = "qnnpack"
+from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
+from torch.utils.data import Dataset
 from PIL import Image
-from torch.autograd import Variable
+import pandas as pd
+from pathlib import Path
+from PIL import Image
 
-# lighting data augmentation
-imagenet_pca = {
-    'eigval': np.asarray([0.2175, 0.0188, 0.0045]),
-    'eigvec': np.asarray([
-        [-0.5675, 0.7192, 0.4009],
-        [-0.5808, -0.0045, -0.8140],
-        [-0.5836, -0.6948, 0.4203],
-    ])
-}
+class TinyValDataset(Dataset):
+    def __init__(self, root, class_to_idx, transform=None):
+        root = Path(root)
+        ann_path = "../data/tiny-imagenet-200/val/val_annotations.txt"
+        # Six columns: image, class, x_min, y_min, x_max, y_max
+        ann = pd.read_csv(
+            ann_path,
+            sep="\t",
+            header=None,
+            names=["img","cls","xmin","ymin","xmax","ymax"]
+        )
+        # Build a class→index map
+        classes = sorted(set(ann.cls))
+        if class_to_idx is None:
+            classes = sorted({entry[1] for entry in ann})
+            self.class_to_idx = {c: i for i, c in enumerate(classes)}
+        else:
+            self.class_to_idx = class_to_idx
+        # Store image file paths and integer labels
+        self.imgs = [root/"images"/img_name for img_name in ann.img]
+        self.targets = [self.class_to_idx[c] for c in ann.cls]
+        self.transform = transform
 
+    def __len__(self):
+        return len(self.imgs)
 
-class Lighting(object):
-    def __init__(self, alphastd,
-                 eigval=imagenet_pca['eigval'],
-                 eigvec=imagenet_pca['eigvec']):
-        self.alphastd = alphastd
-        assert eigval.shape == (3,)
-        assert eigvec.shape == (3, 3)
-        self.eigval = eigval
-        self.eigvec = eigvec
+    def __getitem__(self, idx):
+        img = Image.open(self.imgs[idx]).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        return img, self.targets[idx]
+def load_dataset_custom(dataset_cls, training, transform):
+    # 1) Load full set
+    full_ds = dataset_cls(
+        "../data",
+        train=training,
+        download=True,
+        transform=transform
+    )
 
-    def __call__(self, img):
-        if self.alphastd == 0.:
-            return img
-        rnd = np.random.randn(3) * self.alphastd
-        rnd = rnd.astype('float32')
-        v = rnd
-        old_dtype = np.asarray(img).dtype
-        v = v * self.eigval
-        v = v.reshape((3, 1))
-        inc = np.dot(self.eigvec, v).reshape((3,))
-        img = np.add(img, inc)
-        if old_dtype == np.uint8:
-            img = np.clip(img, 0, 255)
-        img = Image.fromarray(img.astype(old_dtype), 'RGB')
-        return img
+    return full_ds
 
-    def __repr__(self):
-        return self.__class__.__name__ + '()'
+def make_split_dataset_loaders(
+    full_ds,
+    n_splits=5,
+    train: bool = False,
+    batch_size: int = 1000,
+):
+    """
+    Partition any torchvision dataset (e.g. KMNIST) into `n_splits` tasks,
+    each containing consecutive labels.  E.g. with n_splits=5:
+      split 0 -> labels {0,1}, split 1 -> {2,3}, …, split 4 -> {8,9}.
+    Returns a list of DataLoaders over those subsets.
+    """
 
+    per_split = len(set(full_ds.targets))  // n_splits
+    loaders = []
+    for split_id in range(n_splits):
+        lo = split_id * per_split
+        hi = lo + per_split
+        idxs = [i for i, lbl in enumerate(full_ds.targets) if lo <= lbl < hi]
+        sub = Subset(full_ds, idxs)
+        loaders.append(DataLoader(sub, batch_size=batch_size, shuffle=not train))
+    return loaders
 
-# label smoothing
-class CrossEntropyLabelSmooth(nn.Module):
+def train_on_loader(model, loader, optimizer, criterion, device, epochs):   
+    model.train()
+    for epoch in range(epochs):
+        pbar = tqdm(loader, desc=f"Epoch {epoch}/{epochs}", unit="batch", leave=False)
+        for x,y in pbar:
+            x,y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(x), y)
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            
+            
 
-    def __init__(self, num_classes, epsilon):
-        super(CrossEntropyLabelSmooth, self).__init__()
-        self.num_classes = num_classes
-        self.epsilon = epsilon
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, inputs, targets):
-        log_probs = self.logsoftmax(inputs)
-        targets = torch.zeros_like(log_probs).scatter_(1, targets.unsqueeze(1), 1)
-        targets = (1 - self.epsilon) * targets + self.epsilon / self.num_classes
-        loss = (-targets * log_probs).mean(0).sum()
-        return loss
-
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self, name, fmt=':f'):
-        self.name = name
-        self.fmt = fmt
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def __str__(self):
-        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
-        return fmtstr.format(**self.__dict__)
-
-
-class ProgressMeter(object):
-    def __init__(self, num_batches, meters, prefix=""):
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-        self.meters = meters
-        self.prefix = prefix
-
-    def display(self, batch):
-        entries = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries += [str(meter) for meter in self.meters]
-        print('\t'.join(entries))
-
-    def _get_batch_fmtstr(self, num_batches):
-        num_digits = len(str(num_batches // 1))
-        fmt = '{:' + str(num_digits) + 'd}'
-        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
-
-
-def save_checkpoint(state, is_best, save):
-    if not os.path.exists(save):
-        os.makedirs(save)
-    filename = os.path.join(save, 'checkpoint.pth.tar')
-    torch.save(state, filename)
-    if is_best:
-        best_filename = os.path.join(save, 'model_best.pth.tar')
-        shutil.copyfile(filename, best_filename)
-
-
-def adjust_learning_rate(optimizer, epoch, args):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = args.learning_rate * (0.1 ** (epoch // 30))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
+# ----- Evaluator for standard backbone model
+def eval_model(model, loader, device):
+    print("starting eval")
+    model.eval()
+    correct = total = 0
     with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            # ensure contiguity before view
-            correct_k = correct[:k].contiguous().view(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+        for batch in tqdm(loader, desc ="evaluating..", unit="batch", ):
+            x, y = batch[0].to(device), batch[1].to(device)
+            preds = model(x).argmax(dim=1)
+            correct += (preds == y).sum().item()
+            total   += y.size(0)
+            print(f"Current accuracy: {correct/total}")
+    return correct/total      
+          

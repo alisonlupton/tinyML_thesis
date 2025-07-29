@@ -2,4 +2,7 @@
 data/
 baseline_6/tiny-imagenet-200.zip
 baseline_6/models/tinyimagenet.pth
-
+baseline_6/models/
+baseline_6/birealnet18
+baseline_6/wandb
+baseline_6/__pycache__

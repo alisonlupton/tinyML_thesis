@@ -1,0 +1,35 @@
+# General
+device: "cpu"
+
+# Dataset
+# CIFAR 10 settings
+dataset: "CIFAR10"
+num_classes: 10
+num_tasks: 5 # 2 classes per task
+
+# CIFAR 100 settings
+# datset: "cifar100"
+# num_classes: 100 
+# num_tasks: 10 # 2 classes per task
+
+
+# Paths
+backbone_path: "models/quicknet_tinyimagenet_bestmodel.pth"
+model_folder: "models"
+
+# Training
+batch_size:
+  train: 64
+  test: 1000
+replay_buffer_size: 1000 
+live_batch: 30
+replay_batch: 80 
+epochs: 3
+
+# Model
+backbone: "quicknet"
+
+# WandB
+wandb_activate: False
+project: "Master's Thesis"
+
