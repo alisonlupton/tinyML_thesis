@@ -2,7 +2,7 @@ import torch
 
 torch.backends.quantized.engine = "qnnpack"
 import torch.nn as nn
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import os
 import csv
@@ -16,10 +16,11 @@ import random
 import matplotlib.pyplot as plt
 import yaml
 import wandb
-from utils import load_dataset_custom, make_split_dataset_loaders
+from utils import load_dataset_custom, make_split_dataset_loaders, update_replay_reservoir, tail_forward, replay_ratio_schedule, sample_replay
 from metrics import continual_learning_metrics_extended, tiny_ML_metrics
 from collections import Counter
 import torch.nn.functional as F
+from cwr_head import CWRHead, CosineClassifier, MLPClassifier
 
 
 #### CITE https://github.com/vlomonaco/ar1-pytorch/blob/master/ar1star_lat_replay.py
@@ -28,6 +29,7 @@ import torch.nn.functional as F
 ###################################################################################################################################################
 ############################################################### CONTINUAL LEARNING Functions ######################################################
 ###################################################################################################################################################
+
 
 
 def debug_logger(
@@ -67,10 +69,46 @@ def debug_logger(
             writer.writeheader()
         writer.writerow(row)
 
+def restrict_to_seen(logits, seen):
+    mask = torch.full_like(logits, float('-inf'))
+    mask[:, seen] = logits[:, seen]
+    return mask
 
+@torch.no_grad()
+def get_lr(prefix, x):
+    h = prefix(x)
+    # map to {-1,+1}
+    return (h >= 0).to(h.dtype).mul_(2).sub_(1)
+
+@torch.no_grad()
+def dump_cwr_stats(head, k=10, tag=""):
+    cw = head.cw        # [C, D]
+    cb = head.cb        # [C]
+    hc = head.hist_count  # [C]
+    norms = cw.norm(dim=1).cpu()
+    print(f"[CWR {tag}] hist_count (first {k}):", hc[:k].cpu().tolist())
+    # larger norm often means that class has larger-magnitude logits → more likely to be predicted.
+    # goal would be that norms for old vs new classes should be in the same ballpark
+    print(f"[CWR {tag}] cw norms   (first {k}):", norms[:k].tolist())
+    
+    # positive bias shifts logits toward that class regardless of features.
+    # if cb is not None:
+    #     print(f"[CWR {tag}] cb bias   (first {k}):", cb[:k].cpu().tolist())
+
+    # Optional: top/bottom classes by norm
+    top = torch.topk(norms, k=min(k, norms.numel())).indices.tolist()
+    bot = torch.topk(-norms, k=min(k, norms.numel())).indices.tolist()
+    print(f"[CWR {tag}] top-norm classes:", top)
+    print(f"[CWR {tag}] low-norm classes:", bot)
+    
+@torch.no_grad()
+def snapshot_hist(head):
+    return head.hist_count.clone().cpu()
 # -----  Continual learning
 def train_with_latent_replay(
     frozen_model,
+    prefix,
+    tail,
     optimizer,
     loss_fn,
     task_loaders_train,
@@ -81,9 +119,10 @@ def train_with_latent_replay(
     replay_batch,
     epochs,
     full_test_dataset,
+    scheduler=None,
 ):
 
-    replay_size_per_class = replay_size // frozen_model.classifier.out_features
+    replay_size_per_class = replay_size // frozen_model.classifier.num_classes
     train_exp, eval_exp, accs, forgettings, overall, overall_full = (
         [],
         [],
@@ -95,29 +134,15 @@ def train_with_latent_replay(
     classwise_feats = defaultdict(
         lambda: deque(maxlen=replay_size_per_class)
     )  # dict of classwise deques
+    scale = 30                       # try 20–30 later on
 
-    # Helpers to extract latents and run head
-    def extract_latent(x):
-        was_training = frozen_model.training
-        frozen_model.eval()
-        with torch.no_grad():
-            h = frozen_model.stem(x)
-            h = frozen_model.features(h)
-            h = frozen_model.global_pool(h)
-            feats = h.flatten(1)
-        if was_training:
-            frozen_model.train()
-        return feats
 
-    def classify(latents):
-        # runs only classifier head  → (B, n_classes)
-        latents = F.normalize(latents, p=2, dim=1)          # trying out normalising
-
-        return frozen_model.classifier(latents)
+    # Helpers to extract latents and run forward, and replay settup
 
     # Loop over tasks
-    class_counts = torch.zeros(frozen_model.classifier.out_features, device=device)
     first_acc = {}
+    
+
 
     if config["wandb_activate"]:
         print("Using WandB!")
@@ -135,278 +160,370 @@ def train_with_latent_replay(
         print("Using CWR*")
     else:
         print("CWR* turned off!")
+        
 
     for t, train_loader in enumerate(task_loaders_train):
         print(f"\n=== Training on Task {t} ===")
+        present_counter = Counter() # reset each task
+        if config['CWR']:
+            start_hist = snapshot_hist(frozen_model.classifier)
 
-        # For this task, collect the classes the model will get introduced to
+
+        # Get task classes
         task_classes = set()
-        for _, y in train_loader:
-            task_classes.update(
-                y.cpu().numpy().tolist()
-            )  # add all labels from this batch to the set
+        for _, y in task_loaders_train[t]:
+            task_classes.update(y.numpy().tolist())
         task_classes = list(sorted(task_classes))
-
+        
+        if t > 0:
+            # Get classes from the directly previous task
+            prev_task_classes = set()
+            for _, y in task_loaders_train[t-1]:
+                prev_task_classes.update(y.numpy().tolist())
+            prev_task_classes = list(prev_task_classes)
+            
+            
+        # Track seen classes across all tasks
+        prev_seen_classes = set()
+        for prev_task in range(t):
+            for _, y in task_loaders_train[prev_task]:
+                prev_seen_classes.update(y.numpy().tolist())
+        
+        # Initialize classifier weights for new task classes
+        for c in task_classes:
+            if c not in prev_seen_classes:
+                # Initialize new class weights with small random values
+                nn.init.normal_(frozen_model.classifier.weight[c], mean=0.0, std=0.01)
+                nn.init.zeros_(frozen_model.classifier.bias[c])
+        
         print(f"CLASSES FOR TASK {t}: {task_classes}")
 
         # Training on this task
         frozen_model.train()
-
-        # CWR*: Re-init the head for this task's classes
-        if config['CWR']:
+        # Non CWR initialisation 
+        if not config["CWR"]:
+            # Standard initialization for new classes
             with torch.no_grad():
                 for c in task_classes:
-                    nn.init.normal_(frozen_model.classifier.weight[c], std=0.01)  # warm up
+                    nn.init.normal_(frozen_model.classifier.weight[c], std=0.01)
                     if frozen_model.classifier.bias is not None:
                         frozen_model.classifier.bias[c].zero_()
-        else:
-            with torch.no_grad():
-                    for c in task_classes:
-                        nn.init.normal_(frozen_model.classifier.weight[c], std=0.01)
-                        frozen_model.classifier.bias[c].zero_()
 
+        # # accumulating weights at the end of each epoch, instead of every minibatch (trying to improve smoothing)
+        # if config['CWR']:
+        #     cw_epoch_accumulator = torch.zeros_like(frozen_model.classifier.cw)
+        #     count_epoch_accumulator = torch.zeros(config['num_classes'], dtype=torch.float, device=device)
         for epoch in range(epochs):
             pbar = tqdm(train_loader, desc=f"Task {t}", unit="batch")
             for step, (x, y) in enumerate(pbar):
                 x, y = x.to(device), y.to(device)
                 
-                #TODO: make replay_batch a function of the epoch
                 # Live batch
                 x_live, y_live = x[:live_batch], y[:live_batch]
-                live_feats = extract_latent(x_live)  # (live_B, D)
+                live_feats = get_lr(prefix, x_live).to(device).float() # B_live × C × H × W
 
                 # Replay batch
                 selected_feats = []
                 selected_labels = []
 
                 # Sample all seen classes, S samples per class
-                available_classes = [
-                    c for c in classwise_feats if len(classwise_feats[c]) > 0
-                ]
+                available_classes = [c for c in classwise_feats if len(classwise_feats[c]) > 0]
 
-                if len(available_classes) > 0:
-                    num_classes_to_sample = len(
-                        available_classes
-                    )  # we want our buffer to have all classes!
-                    samples_per_class = max(
-                        1, replay_batch // num_classes_to_sample
-                    )  # 1 is base case
+                # Compute replay ratio & effective batch
+                replay_ratio = replay_ratio_schedule(t, epoch, step, len(train_loader))      # warm-up by epoch, grow by task
+                # if step == 0:
+                #     print(f"REPLAY RATIO: {replay_ratio}")
+                effective_replay_batch = max(live_batch, int(replay_batch * replay_ratio))
 
-                    for c in random.sample(available_classes, num_classes_to_sample):
-                        feats = random.sample(
-                            classwise_feats[c],
-                            k=min(samples_per_class, len(classwise_feats[c])),
-                        )
-                        selected_feats.extend(feats)
-                        selected_labels.extend([c] * len(feats))
-                    
-                    replay_feats = torch.stack(selected_feats).to(device)
-                    replay_lbls = torch.tensor(selected_labels, device=device)
+
+                # Pick replay samples (int8 CPU tensors)
+                prev_list = prev_task_classes if t > 0 else None
+                selected_feats, selected_labels = sample_replay(
+                    classwise_feats=classwise_feats,
+                    available_classes=available_classes,
+                    total_k=effective_replay_batch,
+                    prev_task_classes=prev_list,
+                    prev_frac=0.4,
+                    rng=random
+                )
+
+                
+                # if step == 0:
+                #     print(f"[replay] wanted {effective_replay_batch}, got {len(selected_feats)} "
+                #         f"from {len(available_classes)} classes")
+                # ---- Get replay batch
+                if selected_feats:
+                    # Stack keeps int8; cast to float on device right before forward
+                    replay_feats_int8 = torch.stack(selected_feats)            # (R, C, H, W) int8, CPU
+                    replay_lbls = torch.tensor(selected_labels, device=device) # (R,)
+                    replay_feats = replay_feats_int8.to(device=device, dtype=torch.float32) 
                 else:
                     replay_feats = None
-
-                # Combine live and replay
-                if replay_feats is not None:
-                    feats = torch.cat([live_feats, replay_feats], 0)
-                    labels = torch.cat([y_live, replay_lbls], 0)
-                else:
-                    feats = live_feats
-                    labels = y_live
-
-                # Forward and backward on classifier only
-                # TODO: make this tunable later on
+                
+                
+                #------ Combine live and replay
                 optimizer.zero_grad()
-                logits = classify(feats)
-                loss = loss_fn(logits, labels)
-                loss.backward()
-                # if step % 50 == 0:
-                #     debug_logger(
-                #         task=t,
-                #         epoch=epoch,
-                #         step=pbar.n,  # tqdm keeps current step in .n
-                #         loss=loss,
-                #         logits=logits,
-                #         live_feats=live_feats,
-                #         grad=frozen_model.classifier.weight.grad,
-                #         write_header=(epoch == 0 and pbar.n == 1),
-                #     )
+                # Replay Buffer has elements
+                if replay_feats is not None:
+                    x_feats = torch.cat([live_feats, replay_feats], dim=0)              # (B_live + B_rep, C,H,W) at LR level
+                    y_all   = torch.cat([y_live, replay_lbls],  dim=0)                  # (B_live + B_rep,)
+                else:
+                    x_feats = live_feats
+                    y_all   = y_live
+                
+                
+                present_idx = torch.unique(y_all)
+                present_classes = present_idx.tolist()
+                present = present_idx.tolist()
+                
+                # Map original labels -> [0..len(present)-1]
+                map_vec = torch.full((config["num_classes"],), -1, device=device, dtype=torch.long)
+                map_vec[present_idx] = torch.arange(len(present_idx), device=device)
+                y_all_remap = map_vec[y_all]  
+                
+                # ---- CWR*: preload consolidated rows for classes in this minibatch
+                if config['CWR']:
+                    # assert len(present_classes) > 0
+                    # assert all(0 <= c < config["num_classes"] for c in present_classes)
+                    
+                    present_counter.update(present_classes)
+                    frozen_model.classifier.preload_cw(present_classes)  # load cw rows -> tw; zero tw for others
+                    
+                # with torch.no_grad():
+                #     if step % 100 == 0:
+                #         tb_pre = frozen_model.classifier.bias.index_select(0, present_idx).clone()
+                #         cb_pre = frozen_model.classifier.cb.index_select(0, present_idx).clone()
+                #         print(f"[mini pre] tb (pre-step): {tb_pre.tolist()}  cb (pre): {cb_pre.tolist()}")
+
+                # Forward on the tail + head (combine live and replay)                
+                # trying cosine reweighting 
+                # Cosine head forward (use logits_all, then slice to present)
+                z = tail(x_feats).flatten(1)                       # (B, D)
+                z = F.normalize(z, dim=1)
+                W = frozen_model.classifier.weight                 # (C, D) — tw during training
+                Wn = F.normalize(W, dim=1)
+                
+                cos_all = z @ Wn.t()                               # unscaled cosine similarities, (B, C)
+                cos_present = cos_all[:, present_idx]              # (B, |present|)
+
+                # logits_all = scale * (z @ Wn.t())    # no bias
+                
+                # CosFace margin on the *target* logit only
+                # inside the loop
+                target_m = 0.2 # maybe try pushing to 0.25 if necessary 
+                warm_frac = 0.4
+                if epoch == 0:
+                    progress = min(1.0, step / max(1, int(warm_frac * len(train_loader))))
+                else:
+                    progress = 1.0  # full margin after epoch 0
+                m = target_m * progress
+                
+                # subtract m from the target cosine *before* scaling
+                cos_margin = cos_present.clone()
+                cos_margin[torch.arange(cos_margin.size(0)), y_all_remap] -= m
+                logits_present = scale * cos_margin                # (B, |present|)
+
+                
+                # Debugging step (want these to remain small)
+                with torch.no_grad():
+                    pos = logits_present.gather(1, y_all_remap.unsqueeze(1)).abs().mean().item()
+                    # average magnitude of non-target logits
+                    onehot = torch.zeros_like(logits_present).scatter_(1, y_all_remap.unsqueeze(1), 1.0)
+                    neg = (logits_present * (1 - onehot)).abs().sum(dim=1) / (logits_present.size(1) - 1 + 1e-9)
+                    #print(f"[logit mag] pos|neg ~ {pos:.1f} | {neg.mean().item():.1f}")
+
+                # Per-class mean (strict balancing)
+                binc = torch.bincount(y_all_remap, minlength=len(present)).float()
+                w = 1.0 / (binc[y_all_remap] + 1e-6)               # inverse frequency
+                w = w / w.mean()                                   # keep scale stable
+
+                loss_vec = loss_fn(logits_present, y_all_remap)    # reduction='none'
+                loss_all = (loss_vec * w).mean()
+                loss_all.backward()
+                
                 optimizer.step()
                 with torch.no_grad():
-                    w = frozen_model.classifier.weight   # (n_classes, D)
-                    w = F.normalize(w, p=2, dim=1)       # make each row unit-norm
-                    frozen_model.classifier.weight.copy_(w)
-                pbar.set_postfix(loss=loss.item())
+                    rows = present_idx  # tensor of class ids in this minibatch
+                    w = frozen_model.classifier.weight.index_select(0, rows)
+                    w = F.normalize(w, dim=1)
+                    frozen_model.classifier.weight.index_copy_(0, rows, w)
+                
+                # if step % 100 == 0:
+                #     with torch.no_grad():
+                #         idx = present_idx  # tensor of class ids in this minibatch
+                #         tw_norms = frozen_model.classifier.weight.index_select(0, idx).norm(dim=1).cpu() # ephemeral norms
+                #         cw_norms = frozen_model.classifier.cw.index_select(0, idx).norm(dim=1).cpu()
+                        
+                        
+                #         eps = 1e-12
+                #         tw_proportional_norms = (tw_norms / tw_norms.sum().clamp_min(eps)).cpu().tolist()
+                #         cw_proportional_norms = (cw_norms / cw_norms.sum().clamp_min(eps)).cpu().tolist()
+                        
+                #         print(f"[mini] tw norms %  : {[round(x*100,2) for x in tw_proportional_norms]}")
+                #         print(f"[mini] cw norms %  : {[round(x*100,2) for x in cw_proportional_norms]}")
+                        
+                #         # tb_post = frozen_model.classifier.bias.index_select(0, present_idx).clone()
+                #         # print(f"[mini post-step] tb (post-step): {tb_post.tolist()}") # ephemeral bias
+                
+                # ---- CWR*: consolidate for *this minibatch*
+                if config['CWR']:
+                    num_classes = config["num_classes"]
+                    binc = torch.bincount(y_all, minlength=config["num_classes"])
+                    
+                    # CWR* uses these numbers for weight consolidation
+                    if step % 100 == 0:
+                        print(f"[count/batch t={t} e={epoch} s={step}]",
+                            {c:int(binc[c]) for c in range(num_classes) if binc[c] > 0})
+                        
+                    counts_present = binc[present_idx].float()
+                    counts_present.fill_(1.0) # equal contribution this batch
+                    # assert len(present) == counts_present.numel()
+                    
+                    
+                    frozen_model.classifier.consolidate(present_classes, counts_present)
+                    # per epoch consolidation     
+                    # with torch.no_grad():
+                    #     tw_present = frozen_model.classifier.weight.index_select(0, present_idx)
+                    #     cw_epoch_accumulator.index_add_(0, present_idx, tw_present)
+                    #     count_epoch_accumulator.index_add_(0, present_idx, counts_present)
+                    # if step % 100 == 0:
+                    #     with torch.no_grad():
+                    #         cb_post = frozen_model.classifier.cb.index_select(0, present_idx).clone()
+                    #         print(f"[mini post-cons] cb (post-cons): {cb_post.tolist()}")
+ 
+                pbar.set_postfix(pos=f"{pos:.2f}", neg=f"{neg.mean().item():.2f}")
 
-            for c in available_classes:
-                w = frozen_model.classifier.weight[c]
-                print(f"Class {c} | Norm: {w.norm():.4f} | Mean: {w.mean():.4f}")
 
-            print(f"Task {t}, Epoch {epoch}, Batch Loss: {loss.item():.4f}")
-            print(
-                f"Logits: min={logits.min().item():.2f}, max={logits.max().item():.2f}, mean={logits.mean().item():.2f}"
-            )
-            # print(
-            #     f"During training task {t}, Replay buffer contains classes:",
-            # list(classwise_feats.keys()),
-            # )
+            # per epoch consolidation
+            # if config['CWR']:
+            #     frozen_model.classifier.cw += cw_epoch_accumulator
+            #     frozen_model.classifier.hist_count += count_epoch_accumulator.to(torch.long)
+                
+                # Norm alignment of CWR head
+                # with torch.no_grad():
+                #     cw_norms = frozen_model.classifier.cw.norm(dim=1)
+                #     tw_norms = frozen_model.classifier.weight.norm(dim=1)
 
-        # CWR*: Check if the stable weight bank and stable bias bank have been initialised, if not, create
-        if config['CWR']:
-            if not hasattr(frozen_model.classifier, "cwr_bank"):
-                frozen_model.classifier.cwr_bank = torch.zeros_like(
-                    frozen_model.classifier.weight.data
-                )
-            if not hasattr(frozen_model.classifier, "cwr_bias_bank"):
-                frozen_model.classifier.cwr_bias_bank = torch.zeros_like(
-                    frozen_model.classifier.bias.data
-                )
+                #     ratio = (tw_norms + 1e-8) / (cw_norms + 1e-8)
+                #     ratio = ratio.clamp(min=0.1, max=10.0)  # prevent extreme scaling
 
-        # CWR*: Calculate average weight and bias for the current task classes
-            alpha = config["alpha"]  # tunable (could also be running average)
-            for c in task_classes:
-                prev = frozen_model.classifier.weight[c].detach()
-                new = frozen_model.classifier.cwr_bank[c]
+                #     frozen_model.classifier.cw.mul_(ratio.unsqueeze(1))  # scale row-wise
 
-                # Norms
-                prev_norm = prev.norm()
+            # Step the scheduler after each epoch
+            if scheduler:
+                scheduler.step()
 
-                # Weighted average
-                updated = alpha * prev + (1 - alpha) * new
-
-                # Renormalize to previous magnitude
-                updated = updated * (prev_norm / updated.norm().clamp(min=1e-6))
-
-                # Normalize to previous norm to avoid magnitude decay
-                with torch.no_grad():
-                    frozen_model.classifier.weight[c].copy_(updated)
-                    frozen_model.classifier.bias.data[c] = (
-                        alpha * frozen_model.classifier.bias.data[c]
-                        + (1 - alpha) * frozen_model.classifier.cwr_bias_bank[c]
-                    )
-                    frozen_model.classifier.cwr_bank[c].copy_(updated)
-                    frozen_model.classifier.cwr_bias_bank[c] = frozen_model.classifier.bias[
-                        c
-                    ].clone()
-
-                print(f"Task {t} - class {c} - alpha {alpha:.3f}")
-                print("Head weight:", frozen_model.classifier.weight.data[c][:5])
-                print("CWR bank   :", frozen_model.classifier.cwr_bank[c][:5])
-
+        
+        
         # Add current task classes to replay buffer AFTER full training
         with torch.no_grad():
-            for x, y in train_loader:
-                x, y = x.to(device), y.to(device)
-                feats = extract_latent(x)
-                feats = F.normalize(feats, p=2, dim=1)
-                for lf, lbl in zip(feats.cpu(), y.cpu()):
-                    classwise_feats[int(lbl)].append(lf.cpu())
+            pairs = []
+            for xb, yb in train_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                lr = get_lr(prefix, xb.to(device)).cpu()     # {-1,+1} float
+                # assert torch.all((lr == 1) | (lr == -1)), "LR not binary!"
+                lr_q = lr.to(torch.int8)                     # store as int8 for now
+                # assert torch.all((lr_q == 1) | (lr_q == -1)), "Quantized LR not binary!"
+                pairs.extend([(feat, int(lbl.item())) for feat, lbl in zip(lr_q, yb.cpu())])
+            update_replay_reservoir(classwise_feats, pairs, replay_size_per_class)
 
-        # print(
-        #     f"After training task {t}, Replay buffer contains classes:",
-        #     list(classwise_feats.keys()),
-        # )
-        # print(
-        #     f"Replay class split!!! { {c: len(q) for c, q in classwise_feats.items()} }"
-        # )
-        # CWR*: Copy back the averaged weights and bias to the model
-        if config['CWR']:
-            with torch.no_grad():
-                for c in task_classes:
-                    print(f"Before overwrite - class {c}: norm={frozen_model.classifier.weight[c].norm():.4f}")
-                    print(f"CWR bank - class {c}: norm={frozen_model.classifier.cwr_bank[c].norm():.4f}")
-                    frozen_model.classifier.weight[c].copy_(frozen_model.classifier.cwr_bank[c])
-                    frozen_model.classifier.bias[c].copy_(frozen_model.classifier.cwr_bias_bank[c])
 
-            # Convert to CPU and NumPy
-            bank_np = frozen_model.classifier.cwr_bank.detach().cpu().numpy()
-
-            # Save to CSV
-            np.savetxt(f"models/cwr_bank_task{t}.csv", bank_np, delimiter=",", fmt="%.6f")
+            
 
         # TODO: set seed!
-        # Evaluation after task t on all SEEN data
-        frozen_model.eval()
-        print(f"\n{'='*30} STARTING EVALUATION — TASK {t} {'='*30}")
-        # overall accuracy on all seen tasks
-        seen = ConcatDataset([ld.dataset for ld in task_loaders_test[: t + 1]])
-        seen_loader = DataLoader(
-            seen, batch_size=live_batch + replay_batch, shuffle=False
-        )
-        corr = 0
-        total = 0
+        if config['CWR']:
+            frozen_model.classifier.use_consolidated()
+            
 
-        pred_counter = Counter()
-        label_counter = Counter()
-        with torch.no_grad():
-            for x, y in tqdm(seen_loader, desc="Evaluating on seen data", unit="batch"):
-                x, y = x.to(device), y.to(device)
-                feats = extract_latent(x)
-                preds = classify(feats).argmax(1)
-                corr += (preds == y).sum().item()
-                total += y.size(0)
-                pred_counter.update(preds.cpu().numpy().tolist())
-                label_counter.update(y.cpu().numpy().tolist())
-        print(
-            f"True label distribution on seen test data for task {t}: {label_counter}"
-        )
-        print(f"Predictions on Task {t} test set: {pred_counter}")
-        overall_acc = corr / total
-        overall.append((t, overall_acc))
-        print(f"After task {t}, overall acc on seen data: {overall_acc:.3f}")
 
-        # per-split acc & forgetting
+        frozen_model.eval(); tail.eval()
+        
+        # all seen classes, including curr task
+        task_classes = set(task_classes)  # turn back to a set
+        seen_so_far = sorted(prev_seen_classes | task_classes) # union, then sort for stable indexing
+        # print(f"[t={t}] prev_seen={sorted(prev_seen_classes)} "
+        # f"task={sorted(task_classes)} seen_so_far={seen_so_far[:10]}... (len={len(seen_so_far)})")
+
+
+        
+        print(f"\n=== Evaluating on Task {t} ===")
+        
+        #should be balanced for each class
+        print(f"[Task {t}] present class hits:", dict(present_counter)) # how many minibatches contained each class in the current task’s training loop (live + replay combined).
+        
+        if config['CWR']:
+            end_hist = snapshot_hist(frozen_model.classifier)
+            # How much the CWR* bank’s running sample counters increased during Task t for each class.
+            # should be somewhat balanced, although new classes can be larger
+            print(f"[Task {t}] hist_count delta:", (end_hist - start_hist).tolist()[:10])
+
         for u in range(t + 1):
             loader = task_loaders_test[u]
-            acc = 0
-            tot = 0
-            for x, y in loader:
-                x, y = x.to(device), y.to(device)
-                feats = extract_latent(x)
-                acc += (classify(feats).argmax(1) == y).sum().item()
-                tot += y.size(0)
-            acc = acc / tot
-            print(f"  Task {u} → acc: {acc:.3f}")
-            train_exp.append(t)
-            eval_exp.append(u)
-            accs.append(acc)
-            if u not in first_acc:
-                first_acc[u] = acc
-                forgettings.append(0.0)
-            else:
-                forgettings.append(first_acc[u] - acc)
+            corr = 0
+            tot  = 0
+            pred_hist = []
+            gt_hist   = []
+            # optional: quick confusion matrix; works for <= num_classes you use
+            num_classes = config["num_classes"]
+            conf = torch.zeros(num_classes, num_classes, dtype=torch.int64)
 
-        # Evaluation after task t on ALL data (seen and unseen)
-        print(f"Starting full evaluation on task: {t}")
-        # overall accuracy on all seen tasks
-        full_loader = DataLoader(
-            full_test_dataset, batch_size=live_batch + replay_batch, shuffle=False
-        )
-        corr_full = 0
-        total_full = 0
-        with torch.no_grad():
-            for x, y in tqdm(
-                full_loader, desc="Evaluating on full CIFAR10", unit="batch"
-            ):
-                x, y = x.to(device), y.to(device)
-                feats = extract_latent(x)
-                preds = classify(feats).argmax(1)
-                corr_full += (preds == y).sum().item()
-                total_full += y.size(0)
-        full_acc = corr_full / total_full
-        overall_full.append((t, full_acc))
-        if run:
-            run.log(
-                {
-                    "full_accuracy": full_acc,
-                    "Accuracy on seen data": overall_acc,
-                    "Average Forgetting": np.mean(forgettings),
-                    "Average accuracy on seen data": np.mean([a for _, a in overall]),
-                },
-                step=t,
-            )
-        print(f"After task {t}, CIFAR10 full acc: {full_acc:.3f}")
+            with torch.no_grad():
+                for xb, yb in loader:
+                    xb, yb = xb.to(device), yb.to(device)
+                    
+                    lr = get_lr(prefix, xb).to(device).float()
+                    # new trying cosine 
+                    z = tail(lr).flatten(1)
+                    z = F.normalize(z, dim=1)
+                    if config["CWR"]:
+                        Wc = F.normalize(frozen_model.classifier.cw, dim=1)
+                        logits = scale * (z @ Wc.t())        # no bias
+                    else:
+                        W = F.normalize(frozen_model.classifier.weight, dim=1)
+                        logits = scale * (z @ W.t())  # no bias
+
+                    logits = restrict_to_seen(logits, seen_so_far)
+                    
+                    preds = logits.argmax(1)
+
+                    # accumulate stats
+                    corr += (preds == yb).sum().item()
+                    tot  += yb.size(0)
+
+                    p = preds.cpu() # p is a tensor
+                    g = yb.cpu()
+                    pred_hist.extend(p.tolist()) # convert tensor to integer list, then use extend to add to list
+                    gt_hist.extend(g.tolist())
+                    conf.index_put_((g, p), torch.ones_like(g, dtype=torch.int64), accumulate=True)
+
+            acc = corr / max(1, tot)
+            pred_counts = Counter(pred_hist)
+            gt_counts   = Counter(gt_hist) # ground truth
+
+            print(f"[Task {u}] acc: {acc:.3f}")
+            print(f"[Task {u}] Prediction Labels: {dict(sorted(pred_counts.items()))}")
+            print(f"[Task {u}] True Labels: {dict(sorted(gt_counts.items()))}")
+
+            # Optional: per-class accuracy over seen labels in this split
+            seen_labels = sorted(gt_counts.keys())
+            per_class_acc = {}
+            for c in seen_labels:
+                denom = conf[c].sum().item()
+                per_class_acc[c] = (conf[c, c].item() / denom) if denom > 0 else float('nan')
+            print(f"[Task {u}] per-class acc: {per_class_acc}")
+
+            # keep your metrics bookkeeping
+            train_exp.append(t); eval_exp.append(u); accs.append(acc)
+            if u not in first_acc: first_acc[u] = acc; forgettings.append(0.0)
+            else: forgettings.append(first_acc[u] - acc)
+            
+        if config['CWR']:
+            dump_cwr_stats(frozen_model.classifier, tag=f"after task {t}")
+
+
+
     if config['CWR']:
-        norms = torch.norm(frozen_model.classifier.cwr_bank, dim=1).cpu().numpy()
+        norms = torch.norm(frozen_model.classifier.cw, dim=1).cpu().numpy()
         plt.plot(norms)
         plt.title("L2 Norm of CWR Bank per Class")
     if run:
@@ -491,45 +608,101 @@ def main():
         FP_backbone = QuickNet(num_classes=200).to(device)
         FP_backbone.load_state_dict(torch.load(BACKBONE_PATH, map_location=device))
         print("FP32 model loaded")
+        
+        # FP_backbone.eval()
+        # with torch.no_grad():
+        #     x = torch.randn(1, 3, 32, 32).to(device)
+        #     x = FP_backbone.stem(x)
+        #     for i, m in enumerate(FP_backbone.features):
+        #         x = m(x)
+        #         if isinstance(m, nn.BatchNorm2d):
+        #             print(f"[FP32 QuickNet] After block {i}: {tuple(x.shape)}")
     else:
         raise FileNotFoundError("Couldn't find trained model. Please check.")
 
     # Quick check of backbone
     # eval_quicknet_backbone(FP_backbone, BACKBONE_PATH, device)
 
-    # ----- 2. Load fp32 backbone into BNN
+    # ----- 2. Load fp32 backbone into BNN and add classifier
+    backbone = BinarizedQuickNet(num_classes=200, first_layer_fp32=True).to(device) # adding another modifiable layer
+    
+    # change to match CIFAR10 classes
+    backbone.classifier = CWRHead(backbone.classifier.in_features, total_classes)
+    
+    if config['CWR']:
+        with torch.no_grad():
+            nn.init.normal_(backbone.classifier.weight, mean=0.0, std=0.01)
+            if backbone.classifier.bias is not None:
+                backbone.classifier.bias.zero_()
+            backbone.classifier.cw.zero_()
+            backbone.classifier.cb.zero_()
+            backbone.classifier.hist_count.zero_()
+ 
+    print(f"Added classifier head with a {config['dataset']} head")
 
-    backbone = BinarizedQuickNet(num_classes=200).to(device)
 
+    # ----- 3. Freeze backbone
+    
+    # [Feature map] After block 1: (1, 64, 16, 16)
+    # [Feature map] After block 4: (1, 64, 16, 16)
+    # [Feature map] After block 7: (1, 128, 8, 8)
+    # [Feature map] After block 10: (1, 128, 8, 8)
+    # [Feature map] After block 13: (1, 256, 4, 4)
+    # [Feature map] After block 16: (1, 256, 4, 4)
+
+
+    # with torch.no_grad():
+    #     x = torch.randn(1, 3, 32, 32).to(device)  # or 64x64 for TinyImageNet
+    #     x = backbone.stem(x)
+    #     for i, m in enumerate(backbone.features):
+    #         x = m(x)
+    #         if isinstance(m, nn.BatchNorm2d):  # BN comes at end of each block
+    #             print(f"[Feature map] After block {i}: {tuple(x.shape)}")
+                
+    # choose how many binary blocks to keep trainable
+    
+    k_tail = config["k_layers"]  # trainable conv layers
+    n = len(backbone.features) # should be 18 
+    lr_idx =n - 3 * k_tail   # each block ~ (conv, bn, act), 3 layers per block
+
+    prefix = nn.Sequential(backbone.stem, backbone.features[:lr_idx]).to(device)
+    tail   = nn.Sequential(backbone.features[lr_idx:], backbone.global_pool).to(device)
+
+    prefix.requires_grad_(False)
+    prefix.eval()            # BN/Dropout in inference mode
+
+    tail.requires_grad_(True)  # usually already True; keeps grads flowing
+    tail.train()               # BN/Dropout in training mode
+
+    backbone.classifier.requires_grad_(True)  # just to be safe
+    params = [
+    {'params': tail.parameters(), 'lr': config['learning_rate'], 'weight_decay': 1e-4},
+    {'params': backbone.classifier.parameters(), 'lr': 5*config['learning_rate'], 'weight_decay': 0.0},
+]
+    optimizer = torch.optim.SGD(params, momentum=0.9)
+ 
     def load_fp_weights_into_bnn(fp_model, bnn_model):
         fp_dict = fp_model.state_dict()
         bnn_dict = bnn_model.state_dict()
         for name in bnn_dict:
             if name in fp_dict and bnn_dict[name].shape == fp_dict[name].shape:
                 bnn_dict[name] = fp_dict[name]
-        bnn_model.load_state_dict(bnn_dict, strict=False)
+        bnn_model.load_state_dict(bnn_dict, strict=False) 
 
     load_fp_weights_into_bnn(FP_backbone, backbone)
+    
     print("Loaded weights into BNN")
-
-    # change to match CIFAR10 classes
-    backbone.classifier = nn.Linear(backbone.classifier.in_features, total_classes)
-    print(f"Loaded backbone with {config['dataset']} head")
     # TODO: aim would be to have classifier in 16 or 8 quant
-
-    # ----- 3. Freeze backbone
-    for name, param in backbone.named_parameters():
-        if not name.startswith("classifier"):
-            param.requires_grad = False
+    
     backbone = backbone.to(device)
-    print("Backbone frozen")
+    print("Backbone configured")
 
     # TODO: fix quantization of classifier! (based on BNN paper)
 
     # ----- 4. Prepare continual learning
     print("Preparing CL experiences!")
     # TODO: for later on , batch size should be 1-2 !
-
+    # TODO: make replay buffer size a func of epochs 
     replay_buffer_size = config[
         "replay_buffer_size"
     ]  # overall size of my replay buffer
@@ -555,16 +728,21 @@ def main():
         batch_size=live_batch + replay_batch,  # TODO: check this
     )
 
-    optimizer = torch.optim.SGD(
-        backbone.classifier.parameters(), lr=config["learning_rate"], momentum=0.9
-    )
-    loss_fn = nn.CrossEntropyLoss()
+    
+    # Use label smoothing for better training stability
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.0, reduction='none')
+
+    
+    # Simple learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.8)
 
     # ----- 5. Perform CL
 
     train_exp, eval_exp, accs, forgettings, overall, overall_full = (
         train_with_latent_replay(
             frozen_model=backbone,
+            prefix = prefix,
+            tail = tail,
             optimizer=optimizer,
             loss_fn=loss_fn,
             task_loaders_train=task_loaders_train,
@@ -575,8 +753,10 @@ def main():
             replay_batch=replay_batch,
             epochs=epochs,
             full_test_dataset=full_test_dataset,
+            scheduler=scheduler,
         )
     )
+    breakpoint()
 
     tasks, accuracy = zip(*overall_full)
     plt.plot(tasks, accuracy, marker="o")
@@ -585,31 +765,6 @@ def main():
     plt.grid(True)
     plt.show()
 
-    # training_results = {}
-    # print("Starting CL experiences")
-    # def do_cl():
-    #     training_results['outs'] = train_with_latent_replay(
-    #     backbone,  #
-    #     adapter_opt=optimizer,
-    #     loss_fn=loss_fn,
-    #     task_loaders_train=task_loaders_train,
-    #     task_loaders_test=task_loaders_test,
-    #     device=device,
-    #     replay_size=replay_buffer_size,
-    #     live_B= live_batch,
-    #     replay_R=replay_batch,
-    #     # here we inject the scale & zero_point so your function
-    #     # can quantize+dequantize on the fly
-    #     float_adapter=float_adapter,
-    #     full_test_ds = full_test_ds,
-    #     quant_params=(scale, zero_point)
-    # )
-
-    # mem_delta = measure_sram_peak(do_cl, interval=0.01)
-
-    # print(f"Replay training RAM delta on host: {mem_delta:.1f} MiB")
-    # record_sram_to_csv(mem_delta)
-    # print("Saved SRAM usage to peak_SRAM_usage.csv")
 
     # train_exp, eval_exp, accs, forgettings, overall_accs = training_results['outs']
     print("finished CL experiences")
@@ -649,3 +804,9 @@ if __name__ == "__main__":
     assert config is not None, "Config file failed to load!"
     main()
     print("Completed successfully!")
+
+# STEPS:
+# debugging thing to wandb --> 
+# plot / print Conv layers (output)
+# tsne 
+# try adding a strong head to see how it works 

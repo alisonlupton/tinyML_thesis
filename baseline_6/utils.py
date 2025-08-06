@@ -8,7 +8,135 @@ from PIL import Image
 import pandas as pd
 from pathlib import Path
 from PIL import Image
+import random
+from collections import deque, defaultdict
 
+
+# -------------------------------------------------------- CL REPLAY HELPERS  -------------------------------------------------------- #
+def tail_forward(tail, classifier, lr_maps):
+    z = tail(lr_maps)      # ends with global_pool
+    z = torch.flatten(z, 1)
+    return classifier(z)
+
+def replay_ratio_schedule(t, epoch, step, steps_per_epoch):
+    """
+    r0: base ratio at task 0 after warm-up
+    r_step: increment per task
+    warmup: per-epoch multipliers for epoch 0/1, then 1.0 onwards
+    """
+    
+    if epoch == 0:
+        frac = step / max(1, steps_per_epoch)
+        if frac < 0.25: return 0.0
+        elif frac < 0.50: return 0.5
+        else: return 1.0
+    return 1.0
+
+def sample_replay(classwise_feats,         # dict[int] -> deque of int8 CPU tensors
+                available_classes,       # list[int]
+                total_k,                 # total number of samples to draw
+                prev_task_classes=None,  # list[int] or None
+                prev_frac=0.4,           # fraction of budget for prev-task classes
+                rng=None):
+    """
+    Returns (selected_feats, selected_labels).
+    - Draws up to `total_k` items.
+    - Reserves prev_frac for previous-task classes (if provided).
+    - Fills remainder from all other available classes.
+    - Class-balanced as much as possible; falls back gracefully if deques are short.
+    """
+    if rng is None:
+        rng = random
+
+    if total_k <= 0 or not available_classes:
+        return [], []
+
+    # Split budget
+    k_prev = 0
+    prev = []
+    other = available_classes
+    if prev_task_classes:
+        prev = [c for c in prev_task_classes if c in available_classes]
+        other = [c for c in available_classes if c not in set(prev)]
+        k_prev = min(total_k, int(round(total_k * prev_frac)))
+    k_other = total_k - k_prev
+
+    def draw_from(classes, k):
+        sel_f, sel_y = [], []
+        if not classes or k <= 0:
+            return sel_f, sel_y
+        # roughly balanced quota per class
+        per_class = max(1, k // max(1, len(classes)))
+        remaining = k
+        # first pass: per-class quota
+        for c in classes:
+            pool = classwise_feats[c]
+            take = min(per_class, len(pool), remaining)
+            if take > 0:
+                # random.sample works on Python lists; convert deque -> list
+                picks = rng.sample(list(pool), k=take)
+                sel_f.extend(picks)
+                sel_y.extend([c] * take)
+                remaining -= take
+            if remaining <= 0:
+                break
+        # second pass: top-up if we still need more
+        if remaining > 0:
+            for c in classes:
+                if remaining <= 0:
+                    break
+                pool = classwise_feats[c]
+                # take more if available
+                can_take = min(len(pool), remaining)
+                if can_take > 0:
+                    picks = rng.sample(list(pool), k=can_take)
+                    sel_f.extend(picks)
+                    sel_y.extend([c] * can_take)
+                    remaining -= can_take
+        return sel_f, sel_y
+    
+    
+    f_prev, y_prev = draw_from(prev, k_prev)
+    f_oth,  y_oth  = draw_from(other, k_other)
+
+    # --- Reallocate any shortfall to the other side ---
+    used_prev = len(f_prev)
+    used_oth  = len(f_oth)
+    short_prev = k_prev - used_prev
+    short_oth  = k_other - used_oth
+
+    if short_oth > 0 and prev:
+        f2, y2 = draw_from(prev, short_oth)
+        f_prev.extend(f2); y_prev.extend(y2)
+
+    if short_prev > 0 and other:
+        f2, y2 = draw_from(other, short_prev)
+        f_oth.extend(f2); y_oth.extend(y2)
+
+    return f_prev + f_oth, y_prev + y_oth
+    
+def init_replay(max_per_class):
+    return defaultdict(lambda: deque(maxlen=max_per_class))
+
+def update_replay_reservoir(classwise_feats, new_pairs, max_per_class, rng=random):
+    """
+    new_pairs: iterable of (feat_int8, label_int) collected from current experience.
+    Per-class reservoir sampling to keep at most max_per_class items per class.
+    """
+    per_class_seen = defaultdict(int)
+    for feat, y in new_pairs:
+        c = int(y)
+        per_class_seen[c] += 1
+        seen = per_class_seen[c]
+        buf = classwise_feats[c]
+        if len(buf) < max_per_class:
+            buf.append(feat)
+        else:
+            j = rng.randint(0, seen - 1)
+            if j < max_per_class:
+                buf[j] = feat
+                
+# -------------------------------------------------------- DATALOADERS  -------------------------------------------------------- #
 class TinyValDataset(Dataset):
     def __init__(self, root, class_to_idx, transform=None):
         root = Path(root)
@@ -40,6 +168,7 @@ class TinyValDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img, self.targets[idx]
+
 def load_dataset_custom(dataset_cls, training, transform):
     # 1) Load full set
     full_ds = dataset_cls(
