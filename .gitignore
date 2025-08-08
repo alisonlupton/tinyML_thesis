@@ -6,3 +6,6 @@ baseline_6/models/
 baseline_6/birealnet18
 baseline_6/wandb
 baseline_6/__pycache__
+baseline_6/cursor/
+baseline_6/old/
+baseline_6/logs/

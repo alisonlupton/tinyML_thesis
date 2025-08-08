@@ -9,8 +9,10 @@ import csv
 import numpy as np
 from collections import deque
 from tqdm import tqdm
-from models.quicknet import QuickNet
+# from models.quicknet import QuickNet
 from models.quicknet_BNN import BinarizedQuickNet
+# from models.quicknet_BRN import QuickNetBRN
+from models.quicknet_BNN_BRN import BinarizedQuickNetBRN
 from collections import defaultdict
 import random
 import matplotlib.pyplot as plt
@@ -20,7 +22,11 @@ from utils import load_dataset_custom, make_split_dataset_loaders, update_replay
 from metrics import continual_learning_metrics_extended, tiny_ML_metrics
 from collections import Counter
 import torch.nn.functional as F
-from cwr_head import CWRHead, CosineClassifier, MLPClassifier
+from cwr_head_fixed import CWRHeadFixed as CWRHead
+#from cwr_head import CosineClassifier, MLPClassifier
+from batch_debugger import BatchDebugger
+from tinyml_metrics import TinyMLMetrics
+from model_learning_debugger import ModelLearningDebugger
 
 
 #### CITE https://github.com/vlomonaco/ar1-pytorch/blob/master/ar1star_lat_replay.py
@@ -121,6 +127,10 @@ def train_with_latent_replay(
     full_test_dataset,
     scheduler=None,
 ):
+    # Initialize debuggers and analyzers
+    # debugger = BatchDebugger()
+    # tinyml_analyzer = TinyMLMetrics()
+    model_debugger = ModelLearningDebugger()
 
     replay_size_per_class = replay_size // frozen_model.classifier.num_classes
     train_exp, eval_exp, accs, forgettings, overall, overall_full = (
@@ -162,6 +172,10 @@ def train_with_latent_replay(
         print("CWR* turned off!")
         
 
+    # Initial model analysis
+    print("\n=== Initial TinyML Model Analysis ===")
+    # tinyml_analyzer.analyze_model(frozen_model, input_shape=(1, 3, 32, 32), device=device)
+    
     for t, train_loader in enumerate(task_loaders_train):
         print(f"\n=== Training on Task {t} ===")
         present_counter = Counter() # reset each task
@@ -190,11 +204,18 @@ def train_with_latent_replay(
                 prev_seen_classes.update(y.numpy().tolist())
         
         # Initialize classifier weights for new task classes
+        # Get the pretrained classes from the model (if available)
+        pretrained_classes = getattr(frozen_model, 'pretrained_classes', set())
+        
         for c in task_classes:
-            if c not in prev_seen_classes:
+            if c not in prev_seen_classes and c not in pretrained_classes:
                 # Initialize new class weights with small random values
+                # BUT preserve pretrained weights for classes that were already trained
                 nn.init.normal_(frozen_model.classifier.weight[c], mean=0.0, std=0.01)
                 nn.init.zeros_(frozen_model.classifier.bias[c])
+                print(f"Initialized new class {c} with random weights")
+            elif c in pretrained_classes:
+                print(f"Preserving pretrained weights for class {c}")
         
         print(f"CLASSES FOR TASK {t}: {task_classes}")
 
@@ -203,11 +224,15 @@ def train_with_latent_replay(
         # Non CWR initialisation 
         if not config["CWR"]:
             # Standard initialization for new classes
+            pretrained_classes = getattr(frozen_model, 'pretrained_classes', set())
             with torch.no_grad():
                 for c in task_classes:
-                    nn.init.normal_(frozen_model.classifier.weight[c], std=0.01)
-                    if frozen_model.classifier.bias is not None:
-                        frozen_model.classifier.bias[c].zero_()
+                    if c not in pretrained_classes:
+                        nn.init.normal_(frozen_model.classifier.weight[c], std=0.01)
+                        if frozen_model.classifier.bias is not None:
+                            frozen_model.classifier.bias[c].zero_()
+                    else:
+                        print(f"Preserving pretrained weights for class {c} (non-CWR)")
 
         # # accumulating weights at the end of each epoch, instead of every minibatch (trying to improve smoothing)
         # if config['CWR']:
@@ -221,6 +246,9 @@ def train_with_latent_replay(
                 # Live batch
                 x_live, y_live = x[:live_batch], y[:live_batch]
                 live_feats = get_lr(prefix, x_live).to(device).float() # B_live × C × H × W
+                
+                # Debug live batch
+                # debugger.analyze_batch(x_live, y_live, t, step, epoch, "live")
 
                 # Replay batch
                 selected_feats = []
@@ -271,6 +299,14 @@ def train_with_latent_replay(
                     x_feats = live_feats
                     y_all   = y_live
                 
+                # Debug combined batch
+                # debugger.analyze_batch(x_feats, y_all, t, step, epoch, "combined")
+                
+                # Track TinyML metrics (only for first few steps to avoid slowdown)
+                # if step < 5:
+                #     tinyml_analyzer.track_training_metrics(t, epoch, step, frozen_model, 
+                #                                         input_shape=(1, 3, 32, 32), device=device)
+                
                 
                 present_idx = torch.unique(y_all)
                 present_classes = present_idx.tolist()
@@ -283,12 +319,8 @@ def train_with_latent_replay(
                 
                 # ---- CWR*: preload consolidated rows for classes in this minibatch
                 if config['CWR']:
-                    # assert len(present_classes) > 0
-                    # assert all(0 <= c < config["num_classes"] for c in present_classes)
-                    
                     present_counter.update(present_classes)
-                    frozen_model.classifier.preload_cw(present_classes)  # load cw rows -> tw; zero tw for others
-                    
+                    frozen_model.classifier.preload_batch(present_idx)   # <- tensor of class IDs
                 # with torch.no_grad():
                 #     if step % 100 == 0:
                 #         tb_pre = frozen_model.classifier.bias.index_select(0, present_idx).clone()
@@ -339,7 +371,29 @@ def train_with_latent_replay(
 
                 loss_vec = loss_fn(logits_present, y_all_remap)    # reduction='none'
                 loss_all = (loss_vec * w).mean()
+                
                 loss_all.backward()
+                
+                # Track model learning (only every 50 steps to avoid slowdown)
+                if step % 50 == 0:
+                    # Get full logits for all classes (not just present)
+                    z_full = tail(x_feats).flatten(1)
+                    z_full = F.normalize(z_full, dim=1)
+                    W_full = frozen_model.classifier.weight
+                    Wn_full = F.normalize(W_full, dim=1)
+                    logits_full = scale * (z_full @ Wn_full.t())
+                    
+                    model_debugger.comprehensive_tracking(
+                        model=frozen_model,
+                        logits=logits_full,
+                        targets=y_all,
+                        features=z_full,
+                        classifier=frozen_model.classifier,
+                        loss=loss_all.item(),
+                        task_id=t,
+                        epoch=epoch,
+                        step=step
+                    )
                 
                 optimizer.step()
                 with torch.no_grad():
@@ -367,20 +421,15 @@ def train_with_latent_replay(
                 
                 # ---- CWR*: consolidate for *this minibatch*
                 if config['CWR']:
-                    num_classes = config["num_classes"]
-                    binc = torch.bincount(y_all, minlength=config["num_classes"])
+                    binc_full = torch.bincount(y_all, minlength=config["num_classes"]).float()
+                    counts_present = binc_full.index_select(0, present_idx)  # shape [K]
+                    frozen_model.classifier.consolidate_batch(present_idx, counts_present)
                     
                     # CWR* uses these numbers for weight consolidation
                     if step % 100 == 0:
-                        print(f"[count/batch t={t} e={epoch} s={step}]",
-                            {c:int(binc[c]) for c in range(num_classes) if binc[c] > 0})
                         
-                    counts_present = binc[present_idx].float()
-                    counts_present.fill_(1.0) # equal contribution this batch
-                    # assert len(present) == counts_present.numel()
-                    
-                    
-                    frozen_model.classifier.consolidate(present_classes, counts_present)
+                        print(f"[t={t} e={epoch} s={step}] present={present_classes} counts={counts_present.tolist()}")
+                        
                     # per epoch consolidation     
                     # with torch.no_grad():
                     #     tw_present = frozen_model.classifier.weight.index_select(0, present_idx)
@@ -427,12 +476,19 @@ def train_with_latent_replay(
                 pairs.extend([(feat, int(lbl.item())) for feat, lbl in zip(lr_q, yb.cpu())])
             update_replay_reservoir(classwise_feats, pairs, replay_size_per_class)
 
-
-            
+        # Save batch statistics at end of task
+        # debugger.save_stats()
+        # debugger.plot_batch_analysis()
+        
+        # Save TinyML metrics at end of task
+        # tinyml_analyzer.save_metrics()
+        
+        # Generate comprehensive model learning report
+        model_debugger.generate_comprehensive_report(t, epoch)
 
         # TODO: set seed!
-        if config['CWR']:
-            frozen_model.classifier.use_consolidated()
+        # NOTE: Don't call use_consolidated() here - it resets Weight to CW
+        # use_consolidated() should only be called during evaluation
             
 
 
@@ -512,6 +568,16 @@ def train_with_latent_replay(
                 per_class_acc[c] = (conf[c, c].item() / denom) if denom > 0 else float('nan')
             print(f"[Task {u}] per-class acc: {per_class_acc}")
 
+            # Track task accuracy for model learning debugger
+            if config.get('task_accuracy_tracking', True):
+                model_debugger.track_task_accuracy(
+                    task_id=u,
+                    epoch=0,  # We're evaluating after training, so epoch=0
+                    step=t,   # Use current task as step
+                    accuracy=acc,
+                    task_name=f"Task_{u}"
+                )
+
             # keep your metrics bookkeeping
             train_exp.append(t); eval_exp.append(u); accs.append(acc)
             if u not in first_acc: first_acc[u] = acc; forgettings.append(0.0)
@@ -520,7 +586,10 @@ def train_with_latent_replay(
         if config['CWR']:
             dump_cwr_stats(frozen_model.classifier, tag=f"after task {t}")
 
-
+    # Generate task accuracy report after all tasks are complete
+    if config.get('task_accuracy_tracking', True):
+        print(f"\n📊 Generating Task Accuracy Report...")
+        model_debugger.generate_task_accuracy_report(current_task_id=len(task_loaders_train)-1)
 
     if config['CWR']:
         norms = torch.norm(frozen_model.classifier.cw, dim=1).cpu().numpy()
@@ -603,42 +672,90 @@ def main():
     else:
         raise ValueError("No valid dataset provided")
 
-    # ----- 1. Load base model in FP32, trained on tinyimagenet
+    # ----- 1. Load BNN backbone trained on CIFAR-10 2 classes
     if os.path.exists(BACKBONE_PATH):
-        FP_backbone = QuickNet(num_classes=200).to(device)
-        FP_backbone.load_state_dict(torch.load(BACKBONE_PATH, map_location=device))
-        print("FP32 model loaded")
-        
-        # FP_backbone.eval()
-        # with torch.no_grad():
-        #     x = torch.randn(1, 3, 32, 32).to(device)
-        #     x = FP_backbone.stem(x)
-        #     for i, m in enumerate(FP_backbone.features):
-        #         x = m(x)
-        #         if isinstance(m, nn.BatchNorm2d):
-        #             print(f"[FP32 QuickNet] After block {i}: {tuple(x.shape)}")
+        # Load the BNN model directly
+        try:
+            checkpoint = torch.load(BACKBONE_PATH, map_location=device)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                selected_classes = checkpoint.get('pretrained_classes', [0, 5])
+                val_acc = checkpoint.get('val_accuracy', 0.0)
+                print(f"BNN model loaded (val_acc: {val_acc:.4f}, classes: {selected_classes})")
+            else:
+                selected_classes = [0, 5]  # Default assumption
+                print("BNN model loaded (old format)")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise FileNotFoundError("Couldn't load trained model. Please check.")
     else:
         raise FileNotFoundError("Couldn't find trained model. Please check.")
 
-    # Quick check of backbone
-    # eval_quicknet_backbone(FP_backbone, BACKBONE_PATH, device)
-
-    # ----- 2. Load fp32 backbone into BNN and add classifier
-    backbone = BinarizedQuickNet(num_classes=200, first_layer_fp32=True).to(device) # adding another modifiable layer
+    # ----- 2. Create BNN backbone and load pretrained weights
+    if config.get("use_batch_renorm", False):
+        print("Using Batch Renormalization (BRN) backbone")
+        backbone = BinarizedQuickNetBRN(num_classes=total_classes, first_layer_fp32=True).to(device)
+        # Use the BRN backbone path directly from config
+        BACKBONE_PATH = config["backbone_path"]
+    else:
+        print("Using standard Batch Normalization backbone")
+        backbone = BinarizedQuickNet(num_classes=total_classes, first_layer_fp32=True).to(device)
     
-    # change to match CIFAR10 classes
-    backbone.classifier = CWRHead(backbone.classifier.in_features, total_classes)
+    # Load pretrained weights (excluding classifier)
+    pretrained_dict = {k: v for k, v in checkpoint['model_state_dict'].items() if 'classifier' not in k}
+    model_dict = backbone.state_dict()
+    model_dict.update(pretrained_dict)
+    backbone.load_state_dict(model_dict, strict=False)
+    print("✅ Pretrained BNN backbone weights loaded")
+    
+    # Replace classifier with CWR head (fixed version)
+    backbone.classifier = CWRHead(backbone.classifier.in_features, total_classes, device=device, 
+                                preserve_magnitude=True, preserve_bias=True)
+    
+    # Initialize CWR head with pretrained weights
+    if config.get("use_batch_renorm", False):
+        original_classifier = BinarizedQuickNetBRN(num_classes=2, first_layer_fp32=True).to(device)
+    else:
+        original_classifier = BinarizedQuickNet(num_classes=2, first_layer_fp32=True).to(device)
+    original_classifier.load_state_dict(checkpoint['model_state_dict'])
+    
+    with torch.no_grad():
+        # Map pretrained classes to new classifier positions
+        for i, original_class in enumerate(selected_classes):
+            if original_class < total_classes:  # Make sure it's within bounds
+                backbone.classifier.weight[original_class].copy_(original_classifier.classifier.weight[i])
+                backbone.classifier.bias[original_class].copy_(original_classifier.classifier.bias[i])
+                print(f"Mapped pretrained class {i} (CIFAR-10 class {original_class}) to position {original_class}")
+        
+        # Initialize remaining classes with small random weights
+        for c in range(total_classes):
+            if c not in selected_classes:
+                nn.init.normal_(backbone.classifier.weight[c], mean=0.0, std=0.01)
+                if backbone.classifier.bias is not None:
+                    backbone.classifier.bias[c].zero_()
+                print(f"Initialized new class {c} with random weights")
     
     if config['CWR']:
         with torch.no_grad():
-            nn.init.normal_(backbone.classifier.weight, mean=0.0, std=0.01)
-            if backbone.classifier.bias is not None:
-                backbone.classifier.bias.zero_()
-            backbone.classifier.cw.zero_()
-            backbone.classifier.cb.zero_()
-            backbone.classifier.hist_count.zero_()
+            # Copy pretrained weights to CWR buffers for pretrained classes
+            for i, original_class in enumerate(selected_classes):
+                if original_class < total_classes:
+                    backbone.classifier.cw[original_class].copy_(original_classifier.classifier.weight[i])
+                    backbone.classifier.cb[original_class].copy_(original_classifier.classifier.bias[i])
+                    backbone.classifier.hist_count[original_class] = 1000  # Give some history to pretrained classes
+                    print(f"Copied pretrained weights to CWR buffer for class {original_class}")
+            
+            # Zero out remaining classes
+            for c in range(total_classes):
+                if c not in selected_classes:
+                    backbone.classifier.cw[c].zero_()
+                    backbone.classifier.cb[c].zero_()
+                    backbone.classifier.hist_count[c] = 0
  
-    print(f"Added classifier head with a {config['dataset']} head")
+    print(f"Added classifier head with {config['dataset']} classes")
+    print(f"Pretrained classes: {selected_classes}")
+    
+    # Store pretrained classes information in the model for later reference
+    backbone.pretrained_classes = set(selected_classes)
 
 
     # ----- 3. Freeze backbone
@@ -676,22 +793,14 @@ def main():
 
     backbone.classifier.requires_grad_(True)  # just to be safe
     params = [
-    {'params': tail.parameters(), 'lr': config['learning_rate'], 'weight_decay': 1e-4},
+    {'params': tail.parameters(), 'lr': config['learning_rate'], 'weight_decay': 0.0},
     {'params': backbone.classifier.parameters(), 'lr': 5*config['learning_rate'], 'weight_decay': 0.0},
 ]
     optimizer = torch.optim.SGD(params, momentum=0.9)
- 
-    def load_fp_weights_into_bnn(fp_model, bnn_model):
-        fp_dict = fp_model.state_dict()
-        bnn_dict = bnn_model.state_dict()
-        for name in bnn_dict:
-            if name in fp_dict and bnn_dict[name].shape == fp_dict[name].shape:
-                bnn_dict[name] = fp_dict[name]
-        bnn_model.load_state_dict(bnn_dict, strict=False) 
-
-    load_fp_weights_into_bnn(FP_backbone, backbone)
     
-    print("Loaded weights into BNN")
+ #TODO CHECK THIS LOGIC! might be overwriting weights! 
+ 
+    print("✅ BNN backbone ready for CL")
     # TODO: aim would be to have classifier in 16 or 8 quant
     
     backbone = backbone.to(device)

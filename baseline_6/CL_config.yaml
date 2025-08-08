@@ -13,7 +13,7 @@ num_tasks: 5 # 2 classes per task
 # num_tasks: 10 # 2 classes per task
 
 # Paths
-backbone_path: "models/quicknet_tinyimagenet_bestmodel.pth"
+backbone_path: "models/quicknet_bnn_brn_cifar10_2class_best.pth"
 model_folder: "models"
 
 # Training
@@ -28,10 +28,10 @@ epochs: 3
 alpha: 0.7
 # If α is close to 1, mostly keep the old bank and change it slowly
 # If α is close to 0, you mostly take the new weights
-learning_rate: 0.001 # lower to match paper
+learning_rate: 0.01 # increased to fix dead unfrozen layers
 
 # Continual Learning Strategies
-CWR: False # Class-wise rebalancing
+CWR: True # Class-wise rebalancing
 EWC: False # Elastic Weight Consolidation
 AR1: False # Adaptive Regularization
 
@@ -48,7 +48,11 @@ trainable_layers: "last_k" # Options: "classifier", "last_k", "all"
 k_layers: 2
 # Model
 backbone: "quicknet"
+use_batch_renorm: True  # Enable Batch Renormalization
 
 # WandB
 wandb_activate: False
 project: "Master's Thesis"
+
+# Debugging and Analysis
+task_accuracy_tracking: True  # Enable task accuracy evolution tracking
