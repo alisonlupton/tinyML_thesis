@@ -55,7 +55,15 @@ class TinyMLMetrics:
         model_memory_mb = self._get_model_memory_mb(model)
         
         # FLOPS and MACs analysis
-        input_tensor = torch.randn(input_shape).to(device)
+        # Build input tensor for 1D or 2D models
+        if len(input_shape) == 3:
+            # (B, C, T) for 1D conv
+            input_tensor = torch.randn(input_shape).to(device)
+        elif len(input_shape) == 4:
+            # (B, C, H, W) for 2D conv
+            input_tensor = torch.randn(input_shape).to(device)
+        else:
+            raise ValueError("input_shape must be length 3 (1D) or 4 (2D)")
         try:
             flops, params_count = profile(model, inputs=(input_tensor,), verbose=False)
             flops, params_count = clever_format([flops, params_count], "%.3f")
@@ -192,8 +200,14 @@ class TinyMLMetrics:
         total_params = sum(p.numel() for p in model.parameters())
         
         # Estimate activation memory (rough approximation)
-        batch_size, channels, height, width = input_shape
-        activation_memory = batch_size * channels * height * width * 4  # 4 bytes per float
+        if len(input_shape) == 4:
+            batch_size, channels, height, width = input_shape
+            activation_memory = batch_size * channels * height * width * 4  # 4 bytes per float
+        elif len(input_shape) == 3:
+            batch_size, channels, length = input_shape
+            activation_memory = batch_size * channels * length * 4
+        else:
+            raise ValueError("input_shape must be length 3 (1D) or 4 (2D)")
         
         # Model parameters in SRAM (assuming 4 bytes per parameter)
         param_memory = total_params * 4
@@ -206,18 +220,34 @@ class TinyMLMetrics:
     
     def _estimate_flops_manual(self, model, input_shape):
         """Manual FLOPS estimation for models that don't work with thop"""
-        batch_size, channels, height, width = input_shape
+        if len(input_shape) == 4:
+            batch_size, channels, height, width = input_shape
+        elif len(input_shape) == 3:
+            batch_size, channels, length = input_shape
+        else:
+            raise ValueError("input_shape must be length 3 (1D) or 4 (2D)")
         total_flops = 0
         
         # Estimate FLOPS for each layer type
         for module in model.modules():
-            if isinstance(module, nn.Conv2d):
+            if isinstance(module, nn.Conv2d) and len(input_shape) == 4:
                 # Conv2d FLOPS = H_out * W_out * (C_in * K * K * C_out)
                 h_out = height // module.stride[0] if isinstance(module.stride, tuple) else height // module.stride
                 w_out = width // module.stride[1] if isinstance(module.stride, tuple) else width // module.stride
                 k = module.kernel_size[0] if isinstance(module.kernel_size, tuple) else module.kernel_size
                 total_flops += h_out * w_out * (channels * k * k * module.out_channels)
                 height, width = h_out, w_out
+                channels = module.out_channels
+            elif isinstance(module, nn.Conv1d) and len(input_shape) == 3:
+                # Conv1d FLOPS ≈ L_out * (C_in * K * C_out)
+                stride = module.stride if isinstance(module.stride, int) else module.stride[0]
+                k = module.kernel_size if isinstance(module.kernel_size, int) else module.kernel_size[0]
+                padding = module.padding if isinstance(module.padding, int) else module.padding[0]
+                dilation = module.dilation if isinstance(module.dilation, int) else module.dilation[0]
+                # L_out calculation for 1D conv
+                L_out = (length + 2*padding - dilation*(k-1) - 1) // stride + 1
+                total_flops += L_out * (channels * k * module.out_channels)
+                length = L_out
                 channels = module.out_channels
             elif isinstance(module, nn.Linear):
                 # Linear FLOPS = input_features * output_features
@@ -370,7 +400,7 @@ class TinyMLMetrics:
         
         plt.tight_layout()
         plt.savefig('logs/tinyml_metrics.png', dpi=300, bbox_inches='tight')
-        plt.show()
+        # plt.show()
 
 # Usage example:
 # tinyml_analyzer = TinyMLMetrics()

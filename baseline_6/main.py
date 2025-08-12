@@ -22,7 +22,7 @@ from utils import load_dataset_custom, make_split_dataset_loaders, update_replay
 from metrics import continual_learning_metrics_extended, tiny_ML_metrics
 from collections import Counter
 import torch.nn.functional as F
-from cwr_head_fixed import CWRHeadFixed as CWRHead
+from cwr_head import CWRHead
 #from cwr_head import CosineClassifier, MLPClassifier
 from batch_debugger import BatchDebugger
 from tinyml_metrics import TinyMLMetrics
@@ -906,7 +906,7 @@ def main():
 
 
 if __name__ == "__main__":
-    with open("CL_config.yaml", "r") as f:
+    with open("cifar=_config.yaml", "r") as f:
         config = yaml.safe_load(f)
 
     print("Loaded config file")

@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class CWRHeadFixed(nn.Module):
+class CWRHead(nn.Module):
     def __init__(self, in_features, num_classes, device, preserve_magnitude=True, preserve_bias=True):
         super().__init__()
         self.in_features = in_features
