@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image
 import random
 from collections import deque, defaultdict
-
+import numpy as np
 
 # -------------------------------------------------------- CL REPLAY HELPERS  -------------------------------------------------------- #
 def tail_forward(tail, classifier, lr_maps):
@@ -231,3 +231,94 @@ def eval_model(model, loader, device):
             print(f"Current accuracy: {correct/total}")
     return correct/total      
           
+          
+          
+
+def stratified_group_shuffle_split(y, groups, test_size=0.2, random_state=42, max_iter=2):
+    """
+    Segment-aware, class-stratified shuffle split.
+    - y:            (N,) int class labels in 0..K-1
+    - groups:       (N,) group ids (e.g., segment_ids). A group is never split.
+    - test_size:    fraction for test (e.g., 0.2)
+    - max_iter:     small number of refinement passes
+
+    Returns: train_idx (np.ndarray), test_idx (np.ndarray)
+    """
+    rng = np.random.RandomState(random_state)
+    y = np.asarray(y)
+    groups = np.asarray(groups)
+    assert y.shape[0] == groups.shape[0]
+
+    # Map each group -> indices and per-class counts
+    unique_groups = np.unique(groups)
+    K = int(y.max()) + 1
+    group_to_idx = {g: np.where(groups == g)[0] for g in unique_groups}
+
+    group_class_counts = {}
+    for g, idx in group_to_idx.items():
+        counts = np.bincount(y[idx], minlength=K)
+        group_class_counts[g] = counts
+
+    # Global per-class totals and targets
+    total_counts = np.bincount(y, minlength=K).astype(np.int64)
+    target_test = np.rint(total_counts * test_size).astype(np.int64)
+
+    # Helper to compute L2 distance to target
+    def dist(c):  # c is current test counts
+        d = (c - target_test)
+        return np.dot(d, d)
+
+    # Greedy assignment: add groups to "test" if it improves distance to target
+    test_groups = set()
+    current_test = np.zeros(K, dtype=np.int64)
+
+    shuffled_groups = np.array(unique_groups)
+    rng.shuffle(shuffled_groups)
+
+    for g in shuffled_groups:
+        cand = current_test + group_class_counts[g]
+        if dist(cand) < dist(current_test):
+            test_groups.add(g)
+            current_test = cand
+
+    # Refinement: try to fix under/over by swapping or adding/removing a few groups
+    for _ in range(max_iter):
+        # If we’re under target on some classes, prefer groups that help those deficits most
+        deficits = target_test - current_test
+        need_more = np.where(deficits > 0)[0]
+        if need_more.size == 0:
+            break
+
+        # Among groups not in test, pick the one that reduces distance the most
+        best_gain, best_g = 0.0, None
+        for g in unique_groups:
+            if g in test_groups:
+                continue
+            gain = dist(current_test) - dist(current_test + group_class_counts[g])
+            if gain > best_gain:
+                best_gain, best_g = gain, g
+        if best_g is not None and best_gain > 0:
+            test_groups.add(best_g)
+            current_test += group_class_counts[best_g]
+        else:
+            break  # no further improvement
+
+    # If we overshot, remove least-useful groups until distance can’t be improved
+    improved = True
+    while improved:
+        improved = False
+        best_gain, best_g = 0.0, None
+        for g in list(test_groups):
+            gain = dist(current_test) - dist(current_test - group_class_counts[g])
+            if gain > best_gain:
+                best_gain, best_g = gain, g
+        if best_g is not None and best_gain > 0:
+            test_groups.remove(best_g)
+            current_test -= group_class_counts[best_g]
+            improved = True
+
+    # Build index arrays
+    test_mask = np.isin(groups, list(test_groups))
+    test_idx = np.where(test_mask)[0]
+    train_idx = np.where(~test_mask)[0]
+    return train_idx, test_idx

@@ -14,7 +14,7 @@ from cwr_head import CWRHead
 import random
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tinyml_metrics import TinyMLMetrics
+# from metrics/tinyml_metrics import TinyMLMetrics
 from pathlib import Path
 
 def load_config():
@@ -31,7 +31,7 @@ def load_processed_dog_data():
     processed_dir = Path("processed_data")
     if not processed_dir.exists():
         raise FileNotFoundError(
-            "Processed data not found! Please run dog_processing_tdm_intelligent.py first."
+            "Processed data not found! Please run process_dog_data.py first."
         )
     
     # Load metadata
@@ -59,17 +59,28 @@ def load_processed_dog_data():
         X = data['X']
         y = data['y']
         
-        # Convert to tensors
+        # Load windowing data
+        seg_ids = data['segment_ids']
+        sess_ids = data.get('session_ids', None)
+        window_len = int(data.get('window_len', 0))
+        stride = int(data.get('stride', 0))
+        
+        # Convert to tensors (raw data - no normalization yet)
         dog_data[dog_id] = {
-            'X': torch.from_numpy(X.astype(np.float32)),
+            'X': torch.from_numpy(X.astype(np.float32)),       # keep as tensor as you do
             'y': torch.from_numpy(y.astype(np.int64)),
+            'segment_ids': seg_ids.astype(np.int32),
+            'session_ids': None if sess_ids is None else sess_ids.astype(np.int32),
             'behaviors': list(data['behaviors']),
-            'sensor_cols': list(data['sensor_cols'])
+            'sensor_cols': list(data['sensor_cols']),
+            'window_len': window_len,
+            'stride': stride,
         }
         
+
         total_samples += len(X)
     
-    print(f"\nTotal samples loaded: {total_samples:,}")
+    # print(f"\nTotal samples loaded: {total_samples:,}")
     
     # Analyze sample distribution
     all_behaviors = []
@@ -77,11 +88,21 @@ def load_processed_dog_data():
         all_behaviors.extend([behaviors[y] for y in data['y'].numpy()])
     
     behavior_counts = pd.Series(all_behaviors).value_counts()
-    print(f"\nSample behavior distribution:")
-    for behavior, count in behavior_counts.items():
-        print(f"  {behavior}: {count:,} samples")
+    # print(f"\nSample behavior distribution:")
+    # for behavior, count in behavior_counts.items():
+    #     print(f"  {behavior}: {count:,} samples")
     
     return dog_data, behavior_to_idx, behaviors
+
+def normalize_features(X, mean, std):
+    """Normalize features using provided mean and std."""
+    return (X - mean) / (std + 1e-8)
+
+def compute_normalization_stats(X_train):
+    """Compute normalization statistics from training data only."""
+    train_mean = X_train.mean(axis=0)
+    train_std = X_train.std(axis=0) + 1e-8
+    return train_mean, train_std
 
 class SimplifiedTDMModel(nn.Module):
     """Simplified TDM model following SparCL paper more closely."""
@@ -381,7 +402,12 @@ def main():
     print(f"Using device: {device}")
     
     # Get input dimension
-    input_dim = len(dog_data[list(dog_data.keys())[0]]['sensor_cols'])
+    first_dog = list(dog_data.keys())[0]
+    input_dim = dog_data[first_dog]['X'].shape[1]   # <- this is L*C
+    
+    print(f"Windowed input_dim (L*C): {input_dim}")
+    print(f"Example window count for first dog: {dog_data[first_dog]['X'].shape[0]}")
+
     
     # Initialize TinyML metrics
     # tinyml_tracker = TinyMLMetrics(save_path="logs/tdm_intelligent_metrics.csv")
@@ -397,11 +423,22 @@ def main():
     backbone_model.to(device)
     
     # Analyze backbone model
-    input_shape = (1, 1, input_dim)  # 1D input for TinyML
+    # input_shape = (1, 1, input_dim)  # 1D input for TinyML
     # tinyml_tracker.analyze_model(backbone_model, input_shape=input_shape, device=device)
     
     # Prepare backbone training data (exact same logic as dog_tdm.py)
-    backbone_dogs = list(dog_data.keys())[:10]  # Use first 10 dogs for backbone
+    target_dog = 47  # Target dog for personalization
+    validation_dog = 48  # Separate validation dog (different from target and training)
+    
+    # Exclude target dog and validation dog from backbone training
+    all_dogs = list(dog_data.keys())
+    available_dogs = [dog for dog in all_dogs if dog not in [target_dog, validation_dog]]
+    backbone_dogs = available_dogs[:10]  # Use first 10 available dogs
+    
+    print(f"Backbone training dogs: {backbone_dogs}")
+    print(f"Backbone validation dog: {validation_dog}")
+    print(f"Target dog for CIL: {target_dog}")
+    
     backbone_X = []
     backbone_y = []
     
@@ -428,21 +465,77 @@ def main():
     backbone_X = torch.cat(backbone_X, dim=0)
     backbone_y = torch.cat(backbone_y, dim=0)
     
-    # Train backbone (exact same as dog_tdm.py)
-    backbone_loader = DataLoader(TensorDataset(backbone_X, backbone_y), 
-                                batch_size=32, shuffle=True)
+    # Split backbone data into train/validation
+    from sklearn.model_selection import train_test_split
+    
+    # Convert to numpy for splitting
+    backbone_X_np = backbone_X.numpy()
+    backbone_y_np = backbone_y.numpy()
+    
+    # Use all backbone training data (no split needed)
+    X_train = backbone_X_np
+    y_train = backbone_y_np
+    
+    # Get separate validation dog data
+    if validation_dog not in dog_data:
+        print(f"Validation dog {validation_dog} not found!")
+        return
+    
+    val_X_np = dog_data[validation_dog]['X'].numpy()
+    val_y_np = dog_data[validation_dog]['y'].numpy()
+    
+    # Filter to only backbone classes
+    val_mask = np.isin(val_y_np, [behavior_to_idx[c] for c in backbone_behaviors])
+    val_X_np = val_X_np[val_mask]
+    val_y_np = val_y_np[val_mask]
+
+    # Remap validation labels to backbone classes (0-3)
+    val_y_remapped = np.zeros(len(val_y_np), dtype=np.int64)
+    for i, cls in enumerate(backbone_behaviors):
+        val_y_remapped[val_y_np == behavior_to_idx[cls]] = i
+    
+    print(f"Validation dog {validation_dog} behavior distribution:")
+    for i, cls in enumerate(backbone_behaviors):
+        count = (val_y_remapped == i).sum()
+        print(f"  {cls}: {count} samples")
+    
+    # Compute normalization statistics ONCE from training data only
+    train_mean, train_std = compute_normalization_stats(X_train)
+    print(f"Train mean/std shapes: {train_mean.shape}, {train_std.shape}")  
+    
+    # Normalize training and validation data using SAME training statistics
+    X_train_norm = normalize_features(X_train, train_mean, train_std)
+    X_val_norm = normalize_features(val_X_np, train_mean, train_std)
+    
+    # Convert back to tensors
+    X_train = torch.from_numpy(X_train_norm).float()
+    y_train = torch.from_numpy(y_train).long()
+    X_val = torch.from_numpy(X_val_norm).float()
+    y_val = torch.from_numpy(val_y_remapped).long()
+    
+    # print(f"Backbone data: {len(X_train)} training samples from {len(backbone_dogs)} dogs")
+    # print(f"Backbone validation: {len(X_val)} samples from dog {validation_dog}")
+    
+    # Create data loaders
+    backbone_train_loader = DataLoader(TensorDataset(X_train, y_train), 
+                                      batch_size=32, shuffle=True)
+    backbone_val_loader = DataLoader(TensorDataset(X_val, y_val), 
+                                    batch_size=32, shuffle=False)
     
     backbone_optimizer = torch.optim.Adam(backbone_model.parameters(), lr=0.001)
     backbone_criterion = nn.CrossEntropyLoss()
     
     print("Training backbone model...")
-    backbone_model.train()
+    best_val_acc = 0.0
+    
     for epoch in range(50):
-        total_loss = 0
-        correct = 0
-        total = 0
+        # Training phase
+        backbone_model.train()
+        train_loss = 0
+        train_correct = 0
+        train_total = 0
         
-        for batch_idx, (X_batch, y_batch) in enumerate(backbone_loader):
+        for batch_idx, (X_batch, y_batch) in enumerate(backbone_train_loader):
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             
             backbone_optimizer.zero_grad()
@@ -451,16 +544,65 @@ def main():
             loss.backward()
             backbone_optimizer.step()
             
-            total_loss += loss.item()
+            train_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
-            total += y_batch.size(0)
-            correct += (predicted == y_batch).sum().item()
+            train_total += y_batch.size(0)
+            train_correct += (predicted == y_batch).sum().item()
+        
+        # Validation phase
+        backbone_model.eval()
+        val_loss = 0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for X_batch, y_batch in backbone_val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                
+                outputs = backbone_model(X_batch)
+                loss = backbone_criterion(outputs, y_batch)
+                
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                val_total += y_batch.size(0)
+                val_correct += (predicted == y_batch).sum().item()
+        
+        # Calculate accuracies
+        train_acc = 100 * train_correct / train_total
+        val_acc = 100 * val_correct / val_total
+        
+        # Track best validation accuracy
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
         
         if epoch % 10 == 0:
-            acc = 100 * correct / total
-            print(f"[Backbone] epoch {epoch} acc={acc:.3f}")
+            print(f"[Backbone] epoch {epoch}: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
     
-    print("Backbone training complete!")
+    # Print per-class validation accuracy for backbone
+    print(f"\n--- BACKBONE VALIDATION PER-CLASS ACCURACY ---")
+    backbone_model.eval()
+    val_class_correct = {cls: 0 for cls in backbone_behaviors}
+    val_class_total = {cls: 0 for cls in backbone_behaviors}
+    
+    with torch.no_grad():
+        for X_batch, y_batch in backbone_val_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            outputs = backbone_model(X_batch)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            for i, cls in enumerate(backbone_behaviors):
+                mask = (y_batch == i)
+                val_class_total[cls] += mask.sum().item()
+                val_class_correct[cls] += (predicted[mask] == y_batch[mask]).sum().item()
+    
+    for cls in backbone_behaviors:
+        if val_class_total[cls] > 0:
+            acc = 100 * val_class_correct[cls] / val_class_total[cls]
+            print(f"  {cls}: {acc:.1f}% ({val_class_correct[cls]}/{val_class_total[cls]} samples)")
+        else:
+            print(f"  {cls}: No samples")
+    
+    print(f"Backbone training complete! Best validation accuracy: {best_val_acc:.3f}")
     
     # Freeze backbone
     for param in backbone_model.backbone.parameters():
@@ -473,35 +615,60 @@ def main():
     # Freeze CIL backbone
     for param in cil_model.backbone.parameters():
         param.requires_grad = False
+    cil_model.backbone.eval()
+
     
     # Analyze CIL model
     # tinyml_tracker.analyze_model(cil_model, input_shape=input_shape, device=device)
     
-    # Split target dog data with stratified sampling to ensure all behaviors are represented
-    target_dog = 47  # Target dog for personalization
+    # Split target dog data with segment-aware splitting to prevent temporal leakage
     if target_dog not in dog_data:
         print(f"Target dog {target_dog} not found!")
         return
     
     X_target = dog_data[target_dog]['X']
     y_target = dog_data[target_dog]['y']
+    segment_ids = dog_data[target_dog]['segment_ids']
     
-    # Use stratified sampling to ensure all behaviors are in both train and test
-    from sklearn.model_selection import train_test_split
+    # Use GroupShuffleSplit to ensure no segment is split across train/test
+    from sklearn.model_selection import GroupShuffleSplit
     
     # Convert to numpy for sklearn
     X_np = X_target.numpy()
     y_np = y_target.numpy()
     
-    # Stratified split to preserve behavior distribution
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_np, y_np, test_size=0.3, random_state=42, stratify=y_np
-    )
+    # GroupShuffleSplit to prevent temporal leakage
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+    train_idx, test_idx = next(gss.split(X_np, y_np, groups=segment_ids))
+    
+    X_train, X_test = X_np[train_idx], X_np[test_idx]
+    y_train, y_test = y_np[train_idx], y_np[test_idx]
+    
+    print(f"Segment-aware split: {len(X_train)} train samples, {len(X_test)} test samples")
+    print(f"Train segments: {len(np.unique(segment_ids[train_idx]))}, Test segments: {len(np.unique(segment_ids[test_idx]))}")
+    print(f"Ensuring no segment overlap: {len(set(segment_ids[train_idx]) & set(segment_ids[test_idx])) == 0}")
+    
+    # Print target dog class distribution
+    print(f"\n--- TARGET DOG {target_dog} CLASS DISTRIBUTION ---")
+    train_class_counts = {}
+    test_class_counts = {}
+    
+    for i, cls in enumerate(all_behaviors):
+        train_class_counts[cls] = (y_train == i).sum().item()
+        test_class_counts[cls] = (y_test == i).sum().item()
+        print(f"  {cls}: {train_class_counts[cls]} train, {test_class_counts[cls]} test")
+    
+    # Use SAME normalization stats from backbone training (no leakage!)
+    # print(f"Using backbone normalization stats for target dog")
+    
+    # Normalize target dog data using SAME backbone training statistics
+    X_train_norm = normalize_features(X_train, train_mean, train_std)
+    X_test_norm = normalize_features(X_test, train_mean, train_std)
     
     # Convert back to tensors
-    X_train = torch.from_numpy(X_train).float()
+    X_train = torch.from_numpy(X_train_norm).float()
     y_train = torch.from_numpy(y_train).long()
-    X_test = torch.from_numpy(X_test).float()
+    X_test = torch.from_numpy(X_test_norm).float()
     y_test = torch.from_numpy(y_test).long()
     
     # Evaluate backbone on all 7 classes before CIL starts
@@ -552,7 +719,7 @@ def main():
             new_class = "Galloping"
         
         
-        print(f"\n--- CIL TASK {task_idx + 1}: Adding '{new_class}' ---")
+        print(f"\n--- CIL TASK {task_idx + 1}: Added '{new_class}' ---")
         
         # Expand classifier if needed
         if task_idx == 0:
@@ -696,10 +863,10 @@ def main():
     plt.xticks(rotation=45)
     
     plt.tight_layout()
-    plt.savefig('intelligent_tdm_fixed_results.png', dpi=300, bbox_inches='tight')
+    plt.savefig('intelligent_tdm_results.png', dpi=300, bbox_inches='tight')
     # plt.show()
     
-    print(f"\nResults saved to intelligent_tdm_fixed_results.png")
+    print(f"\nResults saved to intelligent_tdm_results.png")
     # print(f"TinyML metrics saved to logs/tdm_intelligent_metrics.csv")
 
 if __name__ == "__main__":

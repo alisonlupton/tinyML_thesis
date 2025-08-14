@@ -1,0 +1,271 @@
+from sklearn.model_selection import GroupShuffleSplit
+import numpy as np
+import torch
+from utils import normalize_features, kd_loss_ce
+from replay import update_replay_reservoir, sample_replay
+import random
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def load_CIL_data(dog_data, target_dog, all_behaviors, behavior_to_idx, train_mean, train_std):
+
+    # convert to np for sklearn (need for splitting)
+    X_target = dog_data[target_dog]['X'].numpy()
+    y_target = dog_data[target_dog]['y'].numpy().copy()
+    segment_ids = dog_data[target_dog]['segment_ids']
+
+    # GroupShuffleSplit to prevent temporal leakage (n_splits return one for each dog)
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+    train_idx, test_idx = next(gss.split(X_target, y_target, groups=segment_ids))
+
+        
+    X_train_np, X_test_np = X_target[train_idx], X_target[test_idx]
+    y_train_np, y_test_np = y_target[train_idx], y_target[test_idx]
+
+    print(f"Segment-aware split: {len(X_train_np)} train samples, {len(X_test_np)} test samples")
+    print(f"Train segments: {len(np.unique(segment_ids[train_idx]))}, Test segments: {len(np.unique(segment_ids[test_idx]))}")
+    print(f"Ensuring no segment overlap: {len(set(segment_ids[train_idx]) & set(segment_ids[test_idx])) == 0}")
+
+    # Print target dog class distribution
+    # class distribution (using global 0..6 labels)
+    print(f"\n--- TARGET DOG {target_dog} CLASS DISTRIBUTION ---")
+    for i, cls in enumerate(all_behaviors):
+        trn = int(np.sum(y_train_np == behavior_to_idx[cls]))
+        tst = int(np.sum(y_test_np  == behavior_to_idx[cls]))
+        print(f"  {cls}: {trn} train, {tst} test")
+
+    # Normalize target dog data using SAME backbone training statistics
+    X_train_np = normalize_features(X_train_np, train_mean, train_std)
+    X_test_np  = normalize_features(X_test_np,  train_mean, train_std)
+
+    # Back to tensors for loaders/models
+    X_train = torch.from_numpy(X_train_np).float()
+    y_train = torch.from_numpy(y_train_np).long()
+    X_test  = torch.from_numpy(X_test_np).float()
+    y_test  = torch.from_numpy(y_test_np).long()
+    
+    return X_train, y_train, X_test, y_test
+
+
+def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_num,
+                              train_loader, behavior_to_idx, optimizer, criterion, device,
+                              replay_buffer, replay_labels, task_idx, epoch, buffer_size):
+    epoch_loss = 0.0
+    epoch_correct = 0
+    epoch_total = 0
+
+    kd_weight = cfg['ddr_kd_weight']
+
+    rows_seen = torch.tensor(registry.rows_for_all_known(), device=device, dtype=torch.long)
+
+    for step, (batch_x, batch_y_local) in enumerate(train_loader):
+        batch_x = batch_x.to(device)
+        batch_y_local = batch_y_local.to(device)
+
+        # active task CE
+        logits_task = model.forward_task(batch_x, registry, task_classes)
+        loss = criterion(logits_task, batch_y_local)
+
+        # replay over all seen classes
+        if len(replay_buffer) > 0 and task_idx > 0 and random.random() < 0.5:
+            rep_feats, rep_targets_global = sample_replay(replay_buffer, replay_labels, batch_size=len(batch_x))
+            if rep_feats is not None:
+                rep_feats = rep_feats.to(device)
+                rep_targets_global = rep_targets_global.to(device)
+                
+                logits_replay = model.head.forward_rows(rep_feats, rows_seen)
+
+                rep_local = torch.zeros_like(rep_targets_global)
+                seen_names = registry.seen_classes()  # order matches rows_for_all_known()
+                for i, cname in enumerate(seen_names):
+                    rep_local[rep_targets_global == behavior_to_idx[cname]] = i
+                
+                loss = loss + criterion(logits_replay, rep_local)
+
+        # KD / DDR on previous classes
+        if teacher is not None and prev_num > 0:
+            feats = model._features(batch_x)
+            logits_prev = model.head.forward_rows(feats, list(range(prev_num)))
+            with torch.no_grad():
+                teacher_logits = teacher(feats)
+            loss = loss + kd_loss_ce(logits_prev, teacher_logits, T=2.0, weight=kd_weight)
+
+        optimizer.zero_grad()
+        loss.backward()
+        
+        with torch.no_grad():
+            if model.head.linear.weight.grad is not None:
+                model.head.linear.weight.grad.mul_(model.head.mask)
+            model.head.linear.weight.mul_(model.head.mask)
+
+        # CWI accumulation
+        with torch.no_grad():
+            g = model.head.linear.weight.grad
+            if g is not None:
+                model.head.cwi += (model.head.linear.weight * g).abs()
+  
+        optimizer.step()
+
+        # periodic mask apply
+        if step % 10 == 0:
+            model.head.apply_mask()
+
+        # add to replay
+        with torch.no_grad():
+            feats_batch = model._features(batch_x).detach().cpu()
+        update_replay_reservoir(
+            replay_buffer, replay_labels, feats_batch,
+            torch.tensor([behavior_to_idx[task_classes[i.item()]] for i in batch_y_local]),
+            buffer_size
+        )
+
+        # stats
+        with torch.no_grad():
+            pred = logits_task.argmax(dim=1)
+            epoch_total += batch_y_local.size(0)
+            epoch_correct += (pred == batch_y_local).sum().item()
+            epoch_loss += float(loss.item())
+
+
+    print(f"epoch {epoch:02d} | train_acc={100*epoch_correct/epoch_total:.1f} | loss={epoch_loss/len(train_loader):.3f}")
+
+        
+def CIL_post_task_eval(seen_classes, test_loader, device, all_behaviors, model, registry):
+    
+        with torch.no_grad():
+            total, correct = 0, 0
+            class_correct = {c: 0 for c in seen_classes}
+            class_total   = {c: 0 for c in seen_classes}
+
+            for xb, yb_local_full in test_loader:
+                xb = xb.to(device)
+                # Make a local label vector for seen_classes 0..len(seen)-1
+                yb_local = torch.zeros_like(yb_local_full)
+                for i, cls in enumerate(seen_classes):
+                    yb_local[yb_local_full == all_behaviors.index(cls)] = i
+                yb_local = yb_local.to(device)
+
+                logits_seen = model.forward_task(xb, registry, seen_classes)
+                pred = logits_seen.argmax(dim=1)
+
+                total += yb_local.size(0)
+                correct += (pred == yb_local).sum().item()
+
+                # per-class
+                for i, cls in enumerate(seen_classes):
+                    mask = (yb_local == i)
+                    class_total[cls] += mask.sum().item()
+                    class_correct[cls] += (pred[mask] == yb_local[mask]).sum().item()
+
+        overall_acc = 100.0 * correct / max(total, 1)
+        class_acc = {cls: 100.0 * class_correct[cls] / max(class_total[cls], 1) for cls in seen_classes}
+        
+        return class_acc, overall_acc
+    
+def make_CIL_plots(backbone_class_acc, accuracy_history):
+    
+    # Set seaborn style
+    sns.set_style("whitegrid")
+    sns.set_palette("husl")
+    
+    # Prepare data for plotting
+    stages = ['Backbone'] + [f'Task {i+1}' for i in range(len(accuracy_history))]
+    
+    # Create DataFrame for seaborn
+    plot_data = []
+    for stage_idx, stage in enumerate(stages):
+        if stage == 'Backbone':
+            acc_dict = backbone_class_acc
+        else:
+            acc_dict = accuracy_history[stage_idx - 1]
+        
+        for behavior, accuracy in acc_dict.items():
+            plot_data.append({
+                'Stage': stage,
+                'Behavior': behavior,
+                'Accuracy': accuracy
+            })
+    
+    df = pd.DataFrame(plot_data)
+    
+    # Create the main plot
+    plt.figure(figsize=(14, 8))
+    
+    # Plot per-class accuracy progression
+    ax = sns.lineplot(data=df, x='Stage', y='Accuracy', hue='Behavior', 
+                     marker='o', linewidth=2.5, markersize=8)
+    
+    # Customize the plot
+    plt.title('Per-Class Accuracy Progression: Backbone → CIL Tasks', 
+              fontsize=16, fontweight='bold', pad=20)
+    plt.xlabel('Training Stage', fontsize=12, fontweight='bold')
+    plt.ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+    
+    # Rotate x-axis labels for better readability
+    plt.xticks(rotation=45)
+    
+    # Add grid and customize legend
+    plt.grid(True, alpha=0.3)
+    plt.legend(title='Behavior Classes', bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Add value annotations on points
+    for stage_idx, stage in enumerate(stages):
+        if stage == 'Backbone':
+            acc_dict = backbone_class_acc
+        else:
+            acc_dict = accuracy_history[stage_idx - 1]
+        
+        for behavior, accuracy in acc_dict.items():
+            plt.annotate(f'{accuracy:.1f}%', 
+                        xy=(stage_idx, accuracy), 
+                        xytext=(5, 5), textcoords='offset points',
+                        fontsize=8, alpha=0.7)
+    
+    # Adjust layout to prevent label cutoff
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig('intelligent_tdm_per_class_progression.png', dpi=300, bbox_inches='tight')
+    # plt.show()
+    
+    # Create a second plot showing overall accuracy progression
+    plt.figure(figsize=(10, 6))
+    
+    # Calculate overall accuracy for each stage
+    overall_accuracies = []
+    for stage_idx, stage in enumerate(stages):
+        if stage == 'Backbone':
+            acc_dict = backbone_class_acc
+        else:
+            acc_dict = accuracy_history[stage_idx - 1]
+        overall_acc = sum(acc_dict.values()) / len(acc_dict)
+        overall_accuracies.append(overall_acc)
+    
+    # Plot overall accuracy
+    ax = sns.lineplot(x=stages, y=overall_accuracies, marker='o', linewidth=3, markersize=10)
+    
+    # Customize
+    plt.title('Overall Accuracy Progression: Backbone → CIL Tasks', 
+              fontsize=16, fontweight='bold', pad=20)
+    plt.xlabel('Training Stage', fontsize=12, fontweight='bold')
+    plt.ylabel('Overall Accuracy (%)', fontsize=12, fontweight='bold')
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 100)
+    
+    # Add value annotations
+    for i, (stage, acc) in enumerate(zip(stages, overall_accuracies)):
+        plt.annotate(f'{acc:.1f}%', 
+                    xy=(i, acc), 
+                    xytext=(0, 10), textcoords='offset points',
+                    ha='center', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('intelligent_tdm_overall_progression.png', dpi=300, bbox_inches='tight')
+    # plt.show()
+    
+    print(f"\nResults saved to:")
+    print(f"  - intelligent_tdm_per_class_progression.png")
+    print(f"  - intelligent_tdm_overall_progression.png")
+    # print(f"TinyML metrics saved to logs/tdm_intelligent_metrics.csv")

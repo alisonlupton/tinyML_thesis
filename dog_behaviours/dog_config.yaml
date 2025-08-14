@@ -1,0 +1,53 @@
+
+# Data cleaning paths
+raw_data_path: "../data/DogMoveData_csv_format/DogMoveData.csv"
+dog_info_path: "../data/DogMoveData_csv_format/DogInfo.xlsx"
+cleaned_data_path: "../data/DogMoveData_csv_format/DogMoveData_clean.csv"
+
+# Windowing
+sample_rate_hz: 100
+window_seconds: 1
+stride_seconds: 1
+flatten_windows: False
+
+# Continual learning personalization
+
+# Sensors to use
+use_acc: true
+use_gyro: true
+sensor_locations: ["Back", "Neck"]
+
+# Behavior classes to include
+behaviors: ["Galloping", "Lying on chest", "Sitting", "Sniffing", "Standing", "Trotting", "Walking"]
+
+# Training
+num_pretrain_dogs: 10
+backbone_val_dog: 48
+target_dog: 47
+main_behaviors : ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting', 'Galloping']
+backbone_behaviors: ['Standing', 'Walking', 'Sitting', 'Lying chest']
+cil_behaviors: ['Sniffing', 'Trotting', 'Galloping']
+cil_tasks : [['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing'],
+        ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting'],
+        ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting', 'Galloping']]
+# Backbone training
+backbone_learning_rate: 0.001
+backbone_weight_decay: 0.0001
+backbone_epochs: 50
+# CIL training
+sparsity_ratio: 0.3
+CIL_batch_size: 16
+CIL_epochs: 10
+CIL_learning_rate: 0.001
+ddr_kd_weight: 0.5
+p_intra: 0.02
+p_inter: 0.05
+delta_k: 4
+
+
+# If set, only include these breeds (names must match DogInfo.xlsx). Leave empty to keep all.
+select_breeds: []
+# If set, only include these dog IDs. Leave empty to keep all.
+select_dog_ids: []
+
+

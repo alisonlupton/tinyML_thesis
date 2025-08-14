@@ -2,27 +2,20 @@
 
 import os
 import sys
-from typing import List, Optional
-import argparse
+from typing import List
 import pandas as pd
-import yaml
+from utils import load_config
 
 def main():
-    parser = argparse.ArgumentParser(description="Clean DogMoveData (paper-style): keep Behavior_1..3, canonicalize.")
-    parser.add_argument("--config", type=str, default=os.path.join(os.path.dirname(__file__), "dog_config.yaml"))
-    parser.add_argument("--random_breeds", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=123)
-    args = parser.parse_args()
 
-    with open(args.config, "r") as f:
-        conf = yaml.safe_load(f)
+    cfg = load_config()
 
-    dog_clean = conf.get("dogmove_clean", {})
-    raw_path = dog_clean.get("raw_data_path", "../data/DogMoveData_csv_format/DogMoveData.csv")
-    info_path = dog_clean.get("dog_info_path", "../data/DogMoveData_csv_format/DogInfo.xlsx")
-    out_path = dog_clean.get("output_path", "../data/DogMoveData_csv_format/DogMoveData_clean.csv")
-    select_breeds: List[str] = dog_clean.get("select_breeds", []) or []
-    select_dog_ids: List[int] = dog_clean.get("select_dog_ids", []) or []
+    raw_path = cfg['raw_data_path']
+    info_path =cfg['dog_info_path']
+    out_path = cfg['cleaned_data_path']
+    
+    select_breeds: List[str] = cfg.get("select_breeds", []) or []
+    select_dog_ids: List[int] = cfg.get("select_dog_ids", []) or []
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -45,14 +38,15 @@ def main():
         "GBack_x","GBack_y","GBack_z",
         "GNeck_x","GNeck_y","GNeck_z",
     ]
-    base_cols = ["DogID","TestNum","t_sec","Task"]  # keep Task if present; it's ok if missing
+    base_cols = ["DogID","TestNum","t_sec","Task"]  # keep Task if present;  ok if missing
     label_cols = ["Behavior_1","Behavior_2","Behavior_3"]
     usecols = [c for c in (base_cols + feature_cols + label_cols) if c]  # some may be absent
 
     print(f"Reading raw CSV: {raw_path}")
     
     df = pd.read_csv(raw_path, usecols=lambda c: c in usecols, low_memory=False)
-    # Merge breed info
+    
+    # Merge breed info on dogid
     df = df.merge(df_info_small, on="DogID", how="left")
     
 
@@ -76,7 +70,6 @@ def main():
     df = df[~undefined_mask].copy()
     print(f"Dropped {undefined_mask.sum()} rows with all undefined behaviors")
     
-
     # Save
     df.to_csv(out_path, index=False)
     print(f"Saved cleaned dataset: {out_path}")
