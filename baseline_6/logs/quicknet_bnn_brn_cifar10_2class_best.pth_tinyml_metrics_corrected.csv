@@ -1,0 +1,2 @@
+timestamp,total_parameters,trainable_parameters,model_size_mb,process_memory_mb,model_memory_mb,flops,latency_ms,conv_layers,linear_layers,brn_layers,binary_layers,sram_estimate_kb,flash_estimate_kb,binary_operations,binary_parameters,brn_parameters,binary_ratio
+1754671640.31692,139842,139842,0.5406341552734375,221.953125,0.5406341552734375,2.46M,1.8262720108032227,1,1,7,24,582.2578125,546.2578125,270144,135072,1856,0.9658900759428498

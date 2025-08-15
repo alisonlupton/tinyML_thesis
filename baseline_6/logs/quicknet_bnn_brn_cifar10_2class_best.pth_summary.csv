@@ -1,0 +1,2 @@
+model_name,total_parameters,model_size_mb,flops,latency_ms,sram_estimate_kb,flash_estimate_kb,binary_layers,fp32_layers,total_layers,layer_binary_ratio,parameter_binary_ratio,brn_layers,conv_layers,linear_layers,binary_conv_layers,binary_depthwise_layers,binary_activation_layers
+quicknet_bnn_brn_cifar10_2class_best.pth,139842,0.5406341552734375,2.46M,1.8262720108032227,582.2578125,546.2578125,24,12,36,0.6666666666666666,0.9658900759428498,7,13,1,12,6,6
