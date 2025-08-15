@@ -772,7 +772,7 @@ def main():
             
             loss, acc = train_with_simplified_tdm(
                 cil_model, train_loader, optimizer, criterion, device, 
-                replay_buffer, replay_labels, task_idx, epoch, num_classes=len(task_classes), buffer_size=buffer_size,
+                replay_buffer, replay_labels, task_idx, epoch, num_classes=len(task_classes),
                 p_intra=p_intra, p_inter=p_inter, delta_k=delta_k
             )
         

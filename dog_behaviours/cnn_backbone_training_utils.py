@@ -1,8 +1,7 @@
 import torch 
 import numpy as np 
 from dataclasses import dataclass
-from utils import compute_normalization_stats, normalize_features
-
+from utils import compute_normalization_stats, normalize_features, make_global_to_local_map
 @dataclass
 class BackboneData:
     """Container for backbone training and validation data"""
@@ -14,6 +13,8 @@ class BackboneData:
     train_std: np.ndarray
 
 def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_behaviors, validation_dog):
+    
+    map_backbone, gids_backbone = make_global_to_local_map(backbone_behaviors, behavior_to_idx, device="cpu")
     backbone_X_list = []
     backbone_y_list = []
     
@@ -22,16 +23,15 @@ def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_be
         dog_y = dog_data[dog_id]['y']
         
         # Only include backbone behaviors
-        backbone_indices = [behavior_to_idx[cls] for cls in backbone_behaviors]
-        mask = torch.isin(dog_y, torch.tensor(backbone_indices))
-        if mask.sum() > 0:
-            backbone_X_list.append(dog_X[mask])
-            # Remap labels to backbone classes
-            remapped_y = torch.zeros(mask.sum(), dtype=torch.long)
-            for i, cls in enumerate(backbone_behaviors):
-                cls_idx = behavior_to_idx[cls]
-                remapped_y[dog_y[mask] == cls_idx] = i
-            backbone_y_list.append(remapped_y)
+        mask = torch.isin(dog_y, gids_backbone)
+        
+        # if no backbone behaviors ignore
+        if not mask.any():
+            continue
+        
+        backbone_X_list.append(dog_X[mask])
+        backbone_y_list.append(map_backbone[dog_y[mask]])   # vectorized remap to 0..K-1
+
     
     if len(backbone_X_list) == 0:
         print("No backbone training data found!")
@@ -58,30 +58,23 @@ def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_be
         return
     
     val_X_np = dog_data[validation_dog]['X'].numpy()  # (N, C, L)
-    val_y_np = dog_data[validation_dog]['y'].numpy()  # (N,)
-    
-    # filter to backbone classes
-    val_mask = np.isin(val_y_np, [behavior_to_idx[c] for c in backbone_behaviors])
-    val_X_np = val_X_np[val_mask]
-    val_y_np = val_y_np[val_mask]
+    val_y_np = dog_data[validation_dog]['y'].numpy()  # (N,) global IDs
 
-    
-    # remap labels 0..3
-    val_y_remapped = np.zeros(len(val_y_np), dtype=np.int64)
-    for i, cls in enumerate(backbone_behaviors):
-        val_y_remapped[val_y_np == behavior_to_idx[cls]] = i
-        
+    # Filter to backbone classes, then vectorized remap
+    val_mask = np.isin(val_y_np, gids_backbone.numpy())
+    val_X_np = val_X_np[val_mask]
+    val_y_np = map_backbone[torch.from_numpy(val_y_np[val_mask]).long()].numpy()
       
     print(f"Validation dog {validation_dog} behavior distribution:")
     for i, cls in enumerate(backbone_behaviors):
-        count = (val_y_remapped == i).sum()
+        count = (val_y_np == i).sum()
         print(f"  {cls}: {count} samples")
 
     # normalize using *training* stats
     val_X_np = normalize_features(val_X_np, train_mean, train_std)
 
     X_val = torch.from_numpy(val_X_np).float()
-    y_val = torch.from_numpy(val_y_remapped).long()
+    y_val = torch.from_numpy(val_y_np).long()
     
     return BackboneData(X_train, y_train, X_val, y_val, train_mean, train_std)
 

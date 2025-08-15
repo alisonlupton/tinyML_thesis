@@ -4,8 +4,11 @@ raw_data_path: "../data/DogMoveData_csv_format/DogMoveData.csv"
 dog_info_path: "../data/DogMoveData_csv_format/DogInfo.xlsx"
 cleaned_data_path: "../data/DogMoveData_csv_format/DogMoveData_clean.csv"
 
+# Segmenting
+min_segment_length: 50
+
 # Windowing
-sample_rate_hz: 100
+sample_rate_hz: 100 # every 1 second 
 window_seconds: 1
 stride_seconds: 1
 flatten_windows: False
@@ -20,7 +23,7 @@ sensor_locations: ["Back", "Neck"]
 # Behavior classes to include
 behaviors: ["Galloping", "Lying on chest", "Sitting", "Sniffing", "Standing", "Trotting", "Walking"]
 
-# Training
+# General Training
 num_pretrain_dogs: 10
 backbone_val_dog: 48
 target_dog: 47
@@ -30,20 +33,28 @@ cil_behaviors: ['Sniffing', 'Trotting', 'Galloping']
 cil_tasks : [['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing'],
         ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting'],
         ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting', 'Galloping']]
+
 # Backbone training
 backbone_learning_rate: 0.001
 backbone_weight_decay: 0.0001
 backbone_epochs: 50
+backbone_batch_size_train: 32
+backbone_batch_size_val: 32
+
 # CIL training
+buffer_size: 5000
 sparsity_ratio: 0.3
-CIL_batch_size: 16
+CIL_batch_size_train: 1
+replay_batch_size: 1 # tends to match the live batch size, but can tune this
+CIL_batch_size_test: 1
 CIL_epochs: 10
 CIL_learning_rate: 0.001
 ddr_kd_weight: 0.5
 p_intra: 0.02
 p_inter: 0.05
 delta_k: 4
-
+metrics_path: "plots_and_metrics/dog_cil_metrics.txt"
+plot_dir: "plots_and_metrics"
 
 # If set, only include these breeds (names must match DogInfo.xlsx). Leave empty to keep all.
 select_breeds: []

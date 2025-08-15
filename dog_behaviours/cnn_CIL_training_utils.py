@@ -1,8 +1,7 @@
 from sklearn.model_selection import GroupShuffleSplit
 import numpy as np
 import torch
-from utils import normalize_features, kd_loss_ce
-from replay import update_replay_reservoir, sample_replay
+from utils import normalize_features, kd_loss_ce, make_global_to_local_map
 import random
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -50,38 +49,40 @@ def load_CIL_data(dog_data, target_dog, all_behaviors, behavior_to_idx, train_me
 
 def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_num,
                               train_loader, behavior_to_idx, optimizer, criterion, device,
-                              replay_buffer, replay_labels, task_idx, epoch, buffer_size):
+                              replay_buffer_q, seen_global_ids, seen_names, task_idx, epoch):
     epoch_loss = 0.0
     epoch_correct = 0
     epoch_total = 0
 
     kd_weight = cfg['ddr_kd_weight']
+    buffer_size = cfg['buffer_size']
 
-    rows_seen = torch.tensor(registry.rows_for_all_known(), device=device, dtype=torch.long)
+    rows_seen = torch.tensor(registry.rows_for_all_known(), device=device)
+    map_seen, _ = make_global_to_local_map(registry.seen_classes(),
+                                       behavior_to_idx,
+                                       device=device)
 
     for step, (batch_x, batch_y_local) in enumerate(train_loader):
         batch_x = batch_x.to(device)
         batch_y_local = batch_y_local.to(device)
+        
+        _, task_gids = make_global_to_local_map(task_classes, behavior_to_idx, device=batch_y_local.device)
 
         # active task CE
-        logits_task = model.forward_task(batch_x, registry, task_classes)
-        loss = criterion(logits_task, batch_y_local)
+        logits_live = model.forward_task(batch_x, registry, task_classes)
+        live_loss = criterion(logits_live, batch_y_local)
 
         # replay over all seen classes
-        if len(replay_buffer) > 0 and task_idx > 0 and random.random() < 0.5:
-            rep_feats, rep_targets_global = sample_replay(replay_buffer, replay_labels, batch_size=len(batch_x))
-            if rep_feats is not None:
-                rep_feats = rep_feats.to(device)
-                rep_targets_global = rep_targets_global.to(device)
-                
-                logits_replay = model.head.forward_rows(rep_feats, rows_seen)
-
-                rep_local = torch.zeros_like(rep_targets_global)
-                seen_names = registry.seen_classes()  # order matches rows_for_all_known()
-                for i, cname in enumerate(seen_names):
-                    rep_local[rep_targets_global == behavior_to_idx[cname]] = i
-                
-                loss = loss + criterion(logits_replay, rep_local)
+        if len(replay_buffer_q) > 0 and task_idx > 0:
+            replay_batch_size = cfg['replay_batch_size']
+            replay_feats, replay_targets_global = replay_buffer_q.sample_q(replay_batch_size, seen_global_ids, device=device)
+            if replay_feats is not None:
+                logits_replay = model.head.forward_rows(replay_feats, rows_seen)
+                replay_local = map_seen[replay_targets_global]  # shape: (B,)
+                replay_loss = criterion(logits_replay, replay_local)
+                loss = live_loss + replay_loss
+        else:
+            loss = live_loss
 
         # KD / DDR on previous classes
         if teacher is not None and prev_num > 0:
@@ -89,7 +90,7 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
             logits_prev = model.head.forward_rows(feats, list(range(prev_num)))
             with torch.no_grad():
                 teacher_logits = teacher(feats)
-            loss = loss + kd_loss_ce(logits_prev, teacher_logits, T=2.0, weight=kd_weight)
+            loss += kd_loss_ce(logits_prev, teacher_logits, T=2.0, weight=kd_weight)
 
         optimizer.zero_grad()
         loss.backward()
@@ -113,16 +114,15 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
 
         # add to replay
         with torch.no_grad():
-            feats_batch = model._features(batch_x).detach().cpu()
-        update_replay_reservoir(
-            replay_buffer, replay_labels, feats_batch,
-            torch.tensor([behavior_to_idx[task_classes[i.item()]] for i in batch_y_local]),
-            buffer_size
-        )
+            feats_batch = model._features(batch_x).detach().cpu()   # (B, D) FP32
+            
+        global_targets = task_gids[batch_y_local]  # vectorized: (B,) global IDs
+        
+        replay_buffer_q.add_batch(feats_batch, global_targets)
 
         # stats
         with torch.no_grad():
-            pred = logits_task.argmax(dim=1)
+            pred = logits_live.argmax(dim=1)
             epoch_total += batch_y_local.size(0)
             epoch_correct += (pred == batch_y_local).sum().item()
             epoch_loss += float(loss.item())
@@ -163,7 +163,7 @@ def CIL_post_task_eval(seen_classes, test_loader, device, all_behaviors, model, 
         
         return class_acc, overall_acc
     
-def make_CIL_plots(backbone_class_acc, accuracy_history):
+def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
     
     # Set seaborn style
     sns.set_style("whitegrid")
@@ -224,9 +224,9 @@ def make_CIL_plots(backbone_class_acc, accuracy_history):
     
     # Adjust layout to prevent label cutoff
     plt.tight_layout()
-    
+    plot_dir = cfg['plot_dir']
     # Save the plot
-    plt.savefig('intelligent_tdm_per_class_progression.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plot_dir}/intelligent_tdm_per_class_progression.png', dpi=300, bbox_inches='tight')
     # plt.show()
     
     # Create a second plot showing overall accuracy progression
@@ -262,10 +262,10 @@ def make_CIL_plots(backbone_class_acc, accuracy_history):
                     ha='center', fontsize=12, fontweight='bold')
     
     plt.tight_layout()
-    plt.savefig('intelligent_tdm_overall_progression.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plot_dir}/intelligent_tdm_overall_progression.png', dpi=300, bbox_inches='tight')
     # plt.show()
     
     print(f"\nResults saved to:")
-    print(f"  - intelligent_tdm_per_class_progression.png")
-    print(f"  - intelligent_tdm_overall_progression.png")
-    # print(f"TinyML metrics saved to logs/tdm_intelligent_metrics.csv")
+    print(f"  - plots/ intelligent_tdm_per_class_progression.png")
+    print(f"  - plots/ intelligent_tdm_overall_progression.png")
+    # print(f"TinyML metrics saved to plots/tdm_intelligent_metrics.csv")

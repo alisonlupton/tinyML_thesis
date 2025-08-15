@@ -1,3 +1,4 @@
+# cnn.py
 import torch.nn as nn
 from .cnn_head import ClassRegistry, SimplifiedTDMHead
 

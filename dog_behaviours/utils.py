@@ -1,3 +1,5 @@
+# utils.py
+
 import torch
 import yaml
 from pathlib import Path
@@ -109,10 +111,6 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# ---- Logit slicing utility ----
-def slice_logits(logits, rows):  # rows: 1D LongTensor of row indices
-    # logits: (N, total_classes_so_far)
-    return logits.index_select(dim=1, index=rows.to(logits.device))
 
 # ---- Optional: KD / DDR loss between current & teacher on *previous* classes ----
 def kd_loss_ce(current_logits, teacher_logits, T=2.0, weight=1.0):
@@ -142,3 +140,58 @@ def evaluate_all_classes(model, loader, registry, all_behaviors, device):
     overall = 100.0 * correct / max(total, 1)
     per = {c: (100.0 * per_correct[c] / per_total[c]) if per_total[c] > 0 else 0.0 for c in all_behaviors}
     return overall, per
+
+class ClassRegistry:
+    def __init__(self, all_behaviors):
+        self.all_behaviors = list(all_behaviors)  # fixed universe (7 for now)
+        self.row_for_global = {}   # e.g., {'Standing': 0, 'Walking': 1, ...} for SEEN classes
+        self.global_for_row = []   # inverse mapping for current head rows
+
+    def seen_classes(self):
+        return list(self.row_for_global.keys())
+
+    def add_classes(self, new_class_names):
+        for cname in new_class_names:
+            if cname in self.row_for_global:
+                continue
+            self.row_for_global[cname] = len(self.global_for_row)
+            self.global_for_row.append(cname)
+
+    def rows_for_task(self, task_classes):
+        return [self.row_for_global[c] for c in task_classes]
+
+    def rows_for_all_known(self):
+        return list(range(len(self.global_for_row)))
+
+    def gather_rows_for_eval7(self):
+        """Return indices into current classifier rows in the order of all_behaviors.
+        Unseen classes will be marked as -1."""
+        rows = []
+        for cname in self.all_behaviors:
+            rows.append(self.row_for_global.get(cname, -1))
+        return rows
+    def num_classes(self):
+        return len(self.global_for_row)
+
+    def rows_for(self, class_names):
+        return [self.row_for_global[c] for c in class_names]
+    
+    def make_global_to_local_map(self, class_names, behavior_to_idx, device=None):
+        """
+        Given a list of class names for the current task,
+        return a 1D tensor mapping from global label IDs (in behavior_to_idx space)
+        to local label IDs (0..len(class_names)-1), or -1 if not in class_names.
+        """
+        n_classes = max(behavior_to_idx.values()) + 1
+        mapping = torch.full((n_classes,), -1, dtype=torch.long, device=device)
+        for local_id, cname in enumerate(class_names):
+            global_id = behavior_to_idx[cname]
+            mapping[global_id] = local_id
+        return mapping
+
+def make_global_to_local_map(class_names, behavior_to_idx, device="cpu"):
+    max_gid = max(behavior_to_idx.values())
+    m = torch.full((max_gid + 1,), -1, dtype=torch.long, device=device)
+    gids = torch.tensor([behavior_to_idx[c] for c in class_names], dtype=torch.long, device=device)
+    m[gids] = torch.arange(len(class_names), dtype=torch.long, device=device)
+    return m, gids

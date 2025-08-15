@@ -1,43 +1,9 @@
+# cnn_head.py
 import torch
 import torch.nn as nn
 import math
-
+from utils import ClassRegistry
 # ----- Class Indexing
-class ClassRegistry:
-    def __init__(self, all_behaviors):
-        self.all_behaviors = list(all_behaviors)  # fixed universe (7 for now)
-        self.row_for_global = {}   # e.g., {'Standing': 0, 'Walking': 1, ...} for SEEN classes
-        self.global_for_row = []   # inverse mapping for current head rows
-
-    def seen_classes(self):
-        return list(self.row_for_global.keys())
-
-    def add_classes(self, new_class_names):
-        for cname in new_class_names:
-            if cname in self.row_for_global:
-                continue
-            self.row_for_global[cname] = len(self.global_for_row)
-            self.global_for_row.append(cname)
-
-    def rows_for_task(self, task_classes):
-        return [self.row_for_global[c] for c in task_classes]
-
-    def rows_for_all_known(self):
-        return list(range(len(self.global_for_row)))
-
-    def gather_rows_for_eval7(self):
-        """Return indices into current classifier rows in the order of all_behaviors.
-        Unseen classes will be marked as -1."""
-        rows = []
-        for cname in self.all_behaviors:
-            rows.append(self.row_for_global.get(cname, -1))
-        return rows
-    # add these methods inside ClassRegistry
-    def num_classes(self):
-        return len(self.global_for_row)
-
-    def rows_for(self, class_names):
-        return [self.row_for_global[c] for c in class_names]
 
 # ----------------- SPARCL TDM Implementation    
 def _init_linear_rows(linear, start_row, end_row):

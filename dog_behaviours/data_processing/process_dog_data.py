@@ -10,7 +10,7 @@ import yaml
 from pathlib import Path
 from utils import load_config
 
-def identify_behavior_segments(df, min_segment_length=50):
+def identify_behavior_segments(df, min_segment_length):
     """
     Identify continuous segments of the same behavior.
     
@@ -77,10 +77,10 @@ def compute_window_params(cfg):
     return L, S, fs
 
 
-def windowize_segment(df, seg, sensor_cols, L, S, behavior_to_idx):
+def windowize_segment(df, dog_id, seg, sensor_cols, L, S, behavior_to_idx):
     """
     df: full (unthinned) per-dog dataframe, sorted by ['TestNum','t_sec']
-    seg: dict with start_idx/end_idx etc. produced by identify_behavior_segments
+    seg: dict with start_idx/end_idx etc. produced by identify_behavior_segments, get one dict with one call of this func 
     Returns: list of (Xw, yw, seg_id, (DogID, TestNum))
     """
     start = seg['start_idx']
@@ -89,7 +89,7 @@ def windowize_segment(df, seg, sensor_cols, L, S, behavior_to_idx):
     if length < L:
         return []
 
-    # CONTIGUOUS slice of the original df for this whole segment
+    # CONTIGUOUS slice of the original df for this whole segment (one segment!)
     seg_df = df.iloc[start:end+1]
 
     # compute window starts in absolute row space (no gaps)
@@ -102,7 +102,6 @@ def windowize_segment(df, seg, sensor_cols, L, S, behavior_to_idx):
     # pull contiguous array once
     arr = seg_df[sensor_cols].to_numpy(dtype=np.float32)  # (length, C)
     y_seg = behavior_to_idx[seg['behavior']]
-    dogid = int(seg_df['DogID'].iloc[0])
     testn = int(seg_df['TestNum'].iloc[0])
 
     out = []
@@ -110,10 +109,13 @@ def windowize_segment(df, seg, sensor_cols, L, S, behavior_to_idx):
         s = ws - start
         e = s + L
         Xw = arr[s:e]  # (L, C)
-        out.append((Xw, y_seg, None, (dogid, testn)))  # seg_id filled later
+        out.append((Xw, y_seg, None, (dog_id, testn)))  # seg_id filled later
+        
+    # list of windows for this single behaviour segment for a single dog
+    # Xw is list of features (sensor readings) for a single window
     return out
 
-def make_windows_for_dog_FULL(df, segments, behavior_to_idx, sensor_cols, cfg):
+def make_windows_for_dog_FULL(df, dog_id, segments, behavior_to_idx, sensor_cols, cfg):
     L, S, fs = compute_window_params(cfg)
 
     # ensure sorted + contiguous indexing is done in Main
@@ -123,7 +125,7 @@ def make_windows_for_dog_FULL(df, segments, behavior_to_idx, sensor_cols, cfg):
     windows_per_segment = []
 
     for seg in segments:
-        wlist = windowize_segment(df, seg, sensor_cols, L, S, behavior_to_idx)
+        wlist = windowize_segment(df, dog_id, seg, sensor_cols, L, S, behavior_to_idx)
         if not wlist:
             continue
         seg_id = next_seg_id
@@ -137,8 +139,7 @@ def make_windows_for_dog_FULL(df, segments, behavior_to_idx, sensor_cols, cfg):
             all_sess.append([sess[0], sess[1]])
         windows_per_segment.append((seg_id, seg['behavior'], len(wlist)))
 
-    # OPTIONAL: here you can do class/segment-aware downsampling of windows
-    # e.g., select begin/middle/end *windows* within each segment to cap counts.
+    # stack features per window
 
     X_w = np.stack(all_X, axis=0)  # (N, L, C)
     y_w = np.asarray(all_y, dtype=np.int64)
@@ -198,7 +199,7 @@ def process_dog_data(cfg):
         print(f"\nProcessing Dog {dog_id}: {len(dog_df):,} raw samples")
         
         # Intelligently sample the data
-        segments = identify_behavior_segments(dog_df, min_segment_length=50)
+        segments = identify_behavior_segments(dog_df, cfg['min_segment_length'])
         
         if len(segments) > 0:
             
@@ -209,7 +210,7 @@ def process_dog_data(cfg):
             # Extract features and labels (RAW DATA - no normalization)
             # build fixed windows that inherit segment_id
             X_w, y_w, seg_id_w, session_id_w, L, S = make_windows_for_dog_FULL(
-                dog_df, segments, behavior_to_idx, sensor_cols, cfg
+                dog_df, dog_id, segments, behavior_to_idx, sensor_cols, cfg
             )
 
             processed_data[dog_id] = {
