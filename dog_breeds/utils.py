@@ -9,7 +9,7 @@ import random
 
 def load_config():
     """Load configuration."""
-    with open("dog_behaviors_config.yaml", "r") as f:
+    with open("dog_breeds_config.yaml", "r") as f:
         config = yaml.safe_load(f)
     return config
 
