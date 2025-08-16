@@ -53,6 +53,9 @@ ddr_kd_weight: 0.5
 p_intra: 0.02
 p_inter: 0.05
 delta_k: 4
+cwi_alpha: 1.0
+cwi_beta: 1.0
+cwi_ema: 0.9 # optional, not in SparCL
 metrics_path: "plots_and_metrics/dog_cil_metrics.txt"
 plot_dir: "plots_and_metrics"
 

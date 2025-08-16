@@ -56,23 +56,28 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
 
     kd_weight = cfg['ddr_kd_weight']
     buffer_size = cfg['buffer_size']
+    alpha = cfg['cwi_alpha']
+    beta  = cfg['cwi_beta']
+    ema   = cfg['cwi_ema']
 
+    # Once per task computer
     rows_seen = torch.tensor(registry.rows_for_all_known(), device=device)
     map_seen, _ = make_global_to_local_map(registry.seen_classes(),
                                        behavior_to_idx,
                                        device=device)
-
+    _, task_gids = make_global_to_local_map(task_classes, behavior_to_idx, device=device)
+    
+    W = model.head.linear.weight
     for step, (batch_x, batch_y_local) in enumerate(train_loader):
         batch_x = batch_x.to(device)
         batch_y_local = batch_y_local.to(device)
-        
-        _, task_gids = make_global_to_local_map(task_classes, behavior_to_idx, device=batch_y_local.device)
 
-        # active task CE
+        # ---- forward: live
         logits_live = model.forward_task(batch_x, registry, task_classes)
         live_loss = criterion(logits_live, batch_y_local)
 
-        # replay over all seen classes
+        # ---- forward: replay
+        replay_loss = None
         if len(replay_buffer_q) > 0 and task_idx > 0:
             replay_batch_size = cfg['replay_batch_size']
             replay_feats, replay_targets_global = replay_buffer_q.sample_q(replay_batch_size, seen_global_ids, device=device)
@@ -80,45 +85,43 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
                 logits_replay = model.head.forward_rows(replay_feats, rows_seen)
                 replay_local = map_seen[replay_targets_global]  # shape: (B,)
                 replay_loss = criterion(logits_replay, replay_local)
-                loss = live_loss + replay_loss
-        else:
-            loss = live_loss
-
-        # KD / DDR on previous classes
+        
+        # Combine loss on replay and live        
+        loss = live_loss + replay_loss if replay_loss is not None else live_loss
+        
+        #------ KD / DDR on previous classes
         if teacher is not None and prev_num > 0:
-            feats = model._features(batch_x)
-            logits_prev = model.head.forward_rows(feats, list(range(prev_num)))
             with torch.no_grad():
-                teacher_logits = teacher(feats)
+                feats_batch = model._features(batch_x).detach().cpu()
+            logits_prev = model.head.forward_rows(feats_batch, list(range(prev_num)))
+            with torch.no_grad():
+                teacher_logits = teacher(feats_batch)
             loss += kd_loss_ce(logits_prev, teacher_logits, T=2.0, weight=kd_weight)
 
+
+        #--------- CWI Updating
+        # calculate grads w.r.t. head weights for each component 
+        g_curr = torch.autograd.grad(live_loss, W, retain_graph=True, allow_unused=True)[0]
+        g_mem  = torch.autograd.grad(replay_loss, W, retain_graph=True, allow_unused=True)[0] if replay_loss is not None else None
+
+        model.head.update_cwi_from_grads(g_curr, g_mem, alpha, beta, ema)
+
+        # Step
         optimizer.zero_grad()
         loss.backward()
         
-        with torch.no_grad():
-            if model.head.linear.weight.grad is not None:
-                model.head.linear.weight.grad.mul_(model.head.mask)
-            model.head.linear.weight.mul_(model.head.mask)
-
-        # CWI accumulation
-        with torch.no_grad():
-            g = model.head.linear.weight.grad
-            if g is not None:
-                model.head.cwi += (model.head.linear.weight * g).abs()
-  
+        with torch.no_grad(): # keep pruned weights from updating
+            if W.grad is not None:
+                W.grad.mul_(model.head.mask)
         optimizer.step()
 
-        # periodic mask apply
-        if step % 10 == 0:
-            model.head.apply_mask()
-
-        # add to replay
-        with torch.no_grad():
-            feats_batch = model._features(batch_x).detach().cpu()   # (B, D) FP32
-            
-        global_targets = task_gids[batch_y_local]  # vectorized: (B,) global IDs
+        # apply mask every step! just to enforce
+        with torch.no_grad():           
+            W.mul_(model.head.mask)
         
-        replay_buffer_q.add_batch(feats_batch, global_targets)
+        #------ add to replay
+        global_targets = task_gids[batch_y_local]  # vectorized: (B,) global IDs
+        replay_buffer_q.add_batch(feats_batch, global_targets) # feats batch in # (B, D) FP32    
 
         # stats
         with torch.no_grad():
@@ -126,7 +129,6 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
             epoch_total += batch_y_local.size(0)
             epoch_correct += (pred == batch_y_local).sum().item()
             epoch_loss += float(loss.item())
-
 
     print(f"epoch {epoch:02d} | train_acc={100*epoch_correct/epoch_total:.1f} | loss={epoch_loss/len(train_loader):.3f}")
 

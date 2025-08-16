@@ -24,12 +24,15 @@ class SimplifiedTDMHead(nn.Module):
         nn.init.zeros_(self.linear.bias)
 
         # TDM mask + CWI
-        self.mask = torch.ones_like(self.linear.weight.data, device=device)
+        self.mask = torch.ones_like(self.linear.weight, device=device)
         self._apply_initial_sparsity(self.mask, self.sparsity_ratio)
         self.linear.weight.data *= self.mask
 
-        self.cwi = torch.zeros_like(self.linear.weight.data, device=device)  # importance accumulator
+        self.cwi = torch.zeros_like(self.linear.weight, device=device)  # total importance (weight)
+        self.cwi_curr = torch.zeros_like(self.linear.weight, device=device) # |∂L_curr| (current task grad)
+        self.cwi_mem  = torch.zeros_like(self.linear.weight, device=device) # |∂L_mem| (replay buffer grad)
 
+        
     @staticmethod
     def _apply_initial_sparsity(mask, sparsity_ratio):
         with torch.no_grad():
@@ -63,11 +66,17 @@ class SimplifiedTDMHead(nn.Module):
             block = new_mask[old_out:]
             self._apply_initial_sparsity(block, self.sparsity_ratio)
         self.mask = new_mask
-        self.linear.weight.data *= self.mask
+        with torch.no_grad():
+            self.linear.weight.mul_(self.mask)
 
         new_cwi = torch.zeros_like(self.linear.weight.data, device=self.device)
+        new_cwi_curr = torch.zeros_like(self.linear.weight.data, device=self.device)
+        new_cwi_mem = torch.zeros_like(self.linear.weight.data, device=self.device)
+        
         new_cwi[:old_out].copy_(self.cwi)
-        self.cwi = new_cwi
+        new_cwi_curr[:old_out].copy_(self.cwi_curr)
+        new_cwi_mem[:old_out].copy_(self.cwi_mem)
+        self.cwi, self.cwi_curr, self.cwi_mem = new_cwi, new_cwi_curr, new_cwi_mem
 
     def forward_rows(self, feats, rows):
         """Compute logits for a selected set of rows (task subset or all-known)."""
@@ -88,61 +97,82 @@ class SimplifiedTDMHead(nn.Module):
             out[:, known_mask] = logits_known
         return out
 
-    # ---- TDM / CWI ----
+
     def apply_mask(self):
         with torch.no_grad():
-            self.linear.weight.data *= self.mask
+            self.linear.weight.mul_(self.mask)
 
-    def accumulate_cwi(self, weight_grads):
-        # CWI += |grad * weight|
+    def update_cwi_from_grads(self, g_curr, g_mem, alpha, beta, ema):
+        W = self.linear.weight
         with torch.no_grad():
-            self.cwi += (weight_grads * self.linear.weight.grad).abs()
+            w_l1 = W.abs()
+            if g_curr is None: g_curr = torch.zeros_like(W)
+            if g_mem  is None: g_mem  = torch.zeros_like(W)
+            g_curr = g_curr.abs(); g_mem = g_mem.abs()
+
+            self.cwi_curr.mul_(ema).add_((1 - ema) * g_curr)
+            self.cwi_mem.mul_(ema).add_((1 - ema) * g_mem)
+            self.cwi.mul_(ema).add_((1 - ema) * (w_l1 + alpha * self.cwi_curr + beta * self.cwi_mem))
 
     def update_mask_intra(self, p=0.02):
-        """Shrink/grow within currently active rows using CWI."""
+        """ 
+        Close (zero) a small fraction of the currently active weights with the lowest CW
+        The same number of active weights always stays the same. Happens every epoch % delta_k == 0 
+        """
         with torch.no_grad():
 
-            flat_imp = self.cwi.view(-1)
+            flat_cwi = self.cwi.view(-1)
             flat_mask = self.mask.view(-1)
-            num = int(flat_mask.numel() * p)
-
+        
             active_idx = torch.where(flat_mask > 0)[0]
-            if len(active_idx) > 0 and num > 0:
-                least = torch.argsort(flat_imp[active_idx])[:min(num, len(active_idx))]
-                flat_mask[active_idx[least]] = 0
-
             inactive_idx = torch.where(flat_mask == 0)[0]
-            if len(inactive_idx) > 0 and num > 0:
-                add = torch.randperm(len(inactive_idx), device=flat_imp.device)[:min(num, len(inactive_idx))]
+            
+            if len(active_idx) == 0 or len(inactive_idx) == 0:
+                return
+            # number of inactive weights to open and active weights to drop (equal!)
+            num_swap = max(1, int(len(active_idx) * p))
+            num_swap = min(num_swap, len(inactive_idx))  # preserve density
+            
+            # DDM implementation: drop lowest CWI 
+            if num_swap > 0:
+                least = torch.argsort(flat_cwi[active_idx])[:num_swap]
+                flat_mask[active_idx[least]] = 0
+            
+            # DGM implementation grow highest-CWI zeros
+            if num_swap > 0:
+                add = torch.argsort(flat_cwi[inactive_idx], descending=True)[:num_swap]
                 flat_mask[inactive_idx[add]] = 1
 
             self.mask = flat_mask.view_as(self.mask)
             self.apply_mask()
             
     def update_mask_inter(self, p=0.05):
-        """Warm-up expand: open a fraction of zeros; later shrink by low-CWI."""
+        """Warm-up expand (at the start of each new task): open a fraction of zeros; later shrink by low-CWI."""
         with torch.no_grad():
             
             flat_mask = self.mask.view(-1)
-            zeros = torch.where(flat_mask == 0)[0]
-            if len(zeros) > 0:
-                num = int(flat_mask.numel() * p)
-                add = torch.randperm(len(zeros), device=flat_mask.device)[:min(num, len(zeros))]
-                flat_mask[zeros[add]] = 1
+            zeros = torch.where(flat_mask == 0)[0] # find current zeros
+            num_open = int(len(zeros) * p) # inactive weights to open
+            
+            if num_open > 0:
+                add = torch.randperm(len(zeros), device=flat_mask.device)[:num_open]
+                flat_mask[zeros[add]] = 1 # change zeroes --> 1
+                
             self.mask = flat_mask.view_as(self.mask)
             self.apply_mask()
             
-            
-
     def shrink_after_warmup(self, p=0.05):
         with torch.no_grad():
             flat_imp = self.cwi.view(-1)
             flat_mask = self.mask.view(-1)
-            num = int(flat_mask.numel() * p)
+            
             active_idx = torch.where(flat_mask > 0)[0]
-            if len(active_idx) > 0 and num > 0:
-                least = torch.argsort(flat_imp[active_idx])[:min(num, len(active_idx))]
+            num_drop = int(len(active_idx) * p)
+            
+            if num_drop > 0:
+                least = torch.argsort(flat_imp[active_idx])[:num_drop]
                 flat_mask[active_idx[least]] = 0
+                
             self.mask = flat_mask.view_as(self.mask)
             self.apply_mask()
             

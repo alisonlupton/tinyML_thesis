@@ -162,19 +162,23 @@ def main():
         
     # Measure Sizing! 
     report = profile_cil_resources(
-            cfg, 
-            cil_model, C=C, L=L,
-            batch_size_train=cfg['CIL_batch_size_train'],
-            batch_size_infer=cfg['CIL_batch_size_test'],
-            replay_size=5000,
-            optimizer_kind="adam",                 # or "sgd"
-            deployed_bits_backbone=8,
-            deployed_bits_classifier=8,
-            training_bits_classifier=32,
-            replay_bits=8,
-            activation_bits_train=32,
-            activation_bits_infer=8,
-        )
+        cfg,
+        cil_model, C=C, L=L,
+        batch_size_train=cfg['CIL_batch_size_train'],
+        batch_size_infer=cfg['CIL_batch_size_test'],
+        replay_size=cfg['buffer_size'],
+        optimizer_kind="adam",
+        deployed_bits_backbone=8,
+        deployed_bits_classifier=8,
+        training_bits_classifier=32,
+        replay_bits=8,
+        activation_bits_train=32,
+        activation_bits_infer=8,
+        replay_batch_size=cfg['replay_batch_size'],   # NEW
+        kd_prev_rows=len(backbone_behaviors),         # for Task 1 this is the teacher size
+        kd_enabled=True,                              # you do KD after Task 1
+        autograd_grad_for_cwi=True                    # you use autograd.grad for CWI
+    )
     
     # TDM parameters 
     p_intra = cfg['p_intra']   
