@@ -1,7 +1,14 @@
+# cnn_backbone_training_utils.py
 import torch 
 import numpy as np 
 from dataclasses import dataclass
-from utils import compute_normalization_stats, normalize_features, make_global_to_local_map
+from utils import build_tensors
+import pandas as pd
+from torchvision import transforms
+from PIL import Image
+from torch.utils.data import Dataset
+from typing import List, Dict
+
 @dataclass
 class BackboneData:
     """Container for backbone training and validation data"""
@@ -9,77 +16,54 @@ class BackboneData:
     y_train: torch.Tensor
     X_val: torch.Tensor
     y_val: torch.Tensor
-    train_mean: np.ndarray
-    train_std: np.ndarray
+    gid_to_local: dict
+    local_to_gid: list
+    train_tf: list
+    val_tf: list
+    
+    
+def _make_transforms(img_size):
 
-def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_behaviors, validation_dog):
+    train_tf = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
+        ])
     
-    map_backbone, gids_backbone = make_global_to_local_map(backbone_behaviors, behavior_to_idx, device="cpu")
-    backbone_X_list = []
-    backbone_y_list = []
-    
-    for dog_id in backbone_dogs:
-        dog_X = dog_data[dog_id]['X']
-        dog_y = dog_data[dog_id]['y']
-        
-        # Only include backbone behaviors
-        mask = torch.isin(dog_y, gids_backbone)
-        
-        # if no backbone behaviors ignore
-        if not mask.any():
-            continue
-        
-        backbone_X_list.append(dog_X[mask])
-        backbone_y_list.append(map_backbone[dog_y[mask]])   # vectorized remap to 0..K-1
+    val_tf = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
+    ])
+    return train_tf, val_tf
 
+def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     
-    if len(backbone_X_list) == 0:
-        print("No backbone training data found!")
-        return
-    
-    backbone_X = torch.cat(backbone_X_list, dim=0)     # (Ntr, C, L)
-    backbone_y = torch.cat(backbone_y_list, dim=0)     # (Ntr,)
-    
-    
-    # Compute std and mean from TRAIN only
-    X_train_np = backbone_X.numpy()
-    y_train_np = backbone_y.numpy()
-    train_mean, train_std = compute_normalization_stats(X_train_np)
-    
-    # Normalize
-    X_train_np = normalize_features(X_train_np, train_mean, train_std)
-    X_train = torch.from_numpy(X_train_np).float()
-    y_train = torch.from_numpy(y_train_np).long()
+    img_size = cfg['img_size']
+    backbone_df = dog_data[dog_data["gid"].isin(backbone_dogs)].copy()
 
-    
-    # Get separate validation dog data
-    if validation_dog not in dog_data:
-        print(f"Validation dog {validation_dog} not found!")
-        return
-    
-    val_X_np = dog_data[validation_dog]['X'].numpy()  # (N, C, L)
-    val_y_np = dog_data[validation_dog]['y'].numpy()  # (N,) global IDs
+    # Stable local label mapping (0..B-1)
+    local_ids = sorted(backbone_dogs)
+    gid_to_local = {g:i for i,g in enumerate(local_ids)}
+    backbone_df["local"] = [gid_to_local[int(g)] for g in backbone_df["gid"].tolist()]
 
-    # Filter to backbone classes, then vectorized remap
-    val_mask = np.isin(val_y_np, gids_backbone.numpy())
-    val_X_np = val_X_np[val_mask]
-    val_y_np = map_backbone[torch.from_numpy(val_y_np[val_mask]).long()].numpy()
-      
-    print(f"Validation dog {validation_dog} behavior distribution:")
-    for i, cls in enumerate(backbone_behaviors):
-        count = (val_y_np == i).sum()
-        print(f"  {cls}: {count} samples")
-
-    # normalize using *training* stats
-    val_X_np = normalize_features(val_X_np, train_mean, train_std)
-
-    X_val = torch.from_numpy(val_X_np).float()
-    y_val = torch.from_numpy(val_y_np).long()
-    
-    return BackboneData(X_train, y_train, X_val, y_val, train_mean, train_std)
+    df_train= backbone_df[backbone_df["split"]=="train"].copy()
+    df_val  = backbone_df[backbone_df["split"]=="test"].copy()
 
 
-def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg):
+    train_tf, val_tf = _make_transforms(img_size)
+    
+    X_train, y_train = build_tensors(df_train, train_tf)
+    X_val, y_val = build_tensors(df_val, val_tf)
+    
+    if len(X_train) == 0 or len(X_val) == 0:
+        raise ValueError("No backbone training data found!")
+
+    return BackboneData(X_train, y_train, X_val, y_val, gid_to_local, local_ids, train_tf, val_tf)
+
+
+def train_cnn_backbone(backbone_model, backbone_data, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg, gid2breed):
     print("Training backbone model...")
     best_val_acc = 0.0
     patience = 5
@@ -94,7 +78,7 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
         train_correct = 0
         train_total = 0
         
-        for batch_idx, (X_batch, y_batch) in enumerate(backbone_train_loader):
+        for X_batch, y_batch in backbone_train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             
             backbone_optimizer.zero_grad()
@@ -110,7 +94,7 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
         
         # Validation phase
         backbone_model.eval()
-        val_loss = 0
+        val_loss = 0    
         val_correct = 0
         val_total = 0
         
@@ -154,8 +138,10 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
     print(f"\n--- BACKBONE VALIDATION PER-CLASS ACCURACY ---")
     backbone_model.eval()
     # Print per-class validation accuracy for backbone
-    val_class_correct = {cls: 0 for cls in backbone_behaviors}
-    val_class_total = {cls: 0 for cls in backbone_behaviors}
+    num_local = len(backbone_data.local_to_gid)
+
+    val_class_correct = [0] * num_local
+    val_class_total = [0] * num_local
     
     with torch.no_grad():
         for X_batch, y_batch in backbone_val_loader:
@@ -163,17 +149,59 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
             outputs = backbone_model(X_batch)
             _, predicted = torch.max(outputs.data, 1)
             
-            for i, cls in enumerate(backbone_behaviors):
-                mask = (y_batch == i)
-                val_class_total[cls] += mask.sum().item()
-                val_class_correct[cls] += (predicted[mask] == y_batch[mask]).sum().item()
-    
-    for cls in backbone_behaviors:
-        if val_class_total[cls] > 0:
-            acc = 100 * val_class_correct[cls] / val_class_total[cls]
-            print(f"  {cls}: {acc:.1f}% ({val_class_correct[cls]}/{val_class_total[cls]} samples)")
+            for c in range(num_local):
+                mask = (y_batch == c)
+                if mask.any():
+                    val_class_total[c] += mask.sum().item()
+                    val_class_correct[c] += (predicted[mask] == y_batch[mask]).sum().item()
+
+    for local_idx, gid in enumerate(backbone_data.local_to_gid):
+        if val_class_total[local_idx] > 0:
+            acc = 100 * val_class_correct[local_idx] / val_class_total[local_idx]
+            name = gid2breed[str(gid)]
+            print(f" {name:35s} : {acc:5.1f}% ({val_class_correct[local_idx]}/{val_class_total[local_idx]})")
         else:
-            print(f"  {cls}: No samples")
+            print(f"{local_idx}: No samples")
         
         
     return backbone_model, best_val_acc
+
+
+def eval_new_classes_on_backbone(backbone_model, task_test_loader, task_local_to_gid, backbone_registry_eval, device):
+    rows_for_task, cols_have_rows = [], []
+    for i, gid in enumerate(task_local_to_gid.tolist()):
+        if gid in backbone_registry_eval.row_for_gid:
+            rows_for_task.append(backbone_registry_eval.row_for_gid[gid])
+            cols_have_rows.append(i)
+    rows_for_task = torch.tensor(rows_for_task, device=device, dtype=torch.long)
+    cols_have_rows = torch.tensor(cols_have_rows, device=device, dtype=torch.long)
+
+    backbone_model.eval()
+    total = correct = 0
+    num_local = len(task_local_to_gid)
+    cls_tot = [0]*num_local
+    cls_cor = [0]*num_local
+
+    with torch.no_grad():
+        for xb, y_local in task_test_loader:
+            xb, y_local = xb.to(device), y_local.to(device)
+            feats = backbone_model._features(xb)
+            logits_full = torch.full((xb.size(0), num_local), -1e9, device=device)
+            if len(rows_for_task) > 0:
+                logits_seen = backbone_model.head.forward_rows(feats, rows_for_task)
+                logits_full[:, cols_have_rows] = logits_seen
+
+            pred = logits_full.argmax(dim=1)
+            total += y_local.size(0)
+            correct += (pred == y_local).sum().item()
+            for c in range(num_local):
+                m = (y_local == c)
+                if m.any():
+                    cls_tot[c] += int(m.sum().item())
+                    cls_cor[c] += int((pred[m] == y_local[m]).sum().item())
+
+    overall = 100.0 * correct / max(1, total)
+    per_class = {c: (100.0 * cls_cor[c] / cls_tot[c] if cls_tot[c] > 0 else 0.0) for c in range(num_local)}
+    return overall, per_class
+
+  

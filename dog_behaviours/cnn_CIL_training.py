@@ -20,10 +20,10 @@ def main():
     """Main function - exact same logic as dog_tdm.py but with intelligent sampling."""
     # Set fixed random seeds for reproducibility
     
-    set_seed(42)
-    
     # Load configuration
     cfg = load_config()
+    seed = cfg['random_seed']
+    set_seed(seed)
     
     # Load intelligent sampling data
     dog_data, behavior_to_idx, behaviors = load_processed_dog_data()

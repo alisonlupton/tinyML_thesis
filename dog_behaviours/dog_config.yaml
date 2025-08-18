@@ -1,4 +1,3 @@
-
 # Data cleaning paths
 raw_data_path: "../data/DogMoveData_csv_format/DogMoveData.csv"
 dog_info_path: "../data/DogMoveData_csv_format/DogInfo.xlsx"
@@ -8,7 +7,7 @@ cleaned_data_path: "../data/DogMoveData_csv_format/DogMoveData_clean.csv"
 min_segment_length: 50
 
 # Windowing
-sample_rate_hz: 100 # every 1 second 
+sample_rate_hz: 100 # every 1 second
 window_seconds: 1
 stride_seconds: 1
 flatten_windows: False
@@ -21,18 +20,48 @@ use_gyro: true
 sensor_locations: ["Back", "Neck"]
 
 # Behavior classes to include
-behaviors: ["Galloping", "Lying on chest", "Sitting", "Sniffing", "Standing", "Trotting", "Walking"]
+behaviors:
+  [
+    "Galloping",
+    "Lying on chest",
+    "Sitting",
+    "Sniffing",
+    "Standing",
+    "Trotting",
+    "Walking",
+  ]
 
 # General Training
+random_seed: 42
 num_pretrain_dogs: 10
 backbone_val_dog: 48
 target_dog: 47
-main_behaviors : ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting', 'Galloping']
-backbone_behaviors: ['Standing', 'Walking', 'Sitting', 'Lying chest']
-cil_behaviors: ['Sniffing', 'Trotting', 'Galloping']
-cil_tasks : [['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing'],
-        ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting'],
-        ['Standing', 'Walking', 'Sitting', 'Lying chest', 'Sniffing', 'Trotting', 'Galloping']]
+main_behaviors:
+  [
+    "Standing",
+    "Walking",
+    "Sitting",
+    "Lying chest",
+    "Sniffing",
+    "Trotting",
+    "Galloping",
+  ]
+backbone_behaviors: ["Standing", "Walking", "Sitting", "Lying chest"]
+cil_behaviors: ["Sniffing", "Trotting", "Galloping"]
+cil_tasks:
+  [
+    ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing"],
+    ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing", "Trotting"],
+    [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest",
+      "Sniffing",
+      "Trotting",
+      "Galloping",
+    ],
+  ]
 
 # Backbone training
 backbone_learning_rate: 0.001
@@ -63,5 +92,3 @@ plot_dir: "plots_and_metrics"
 select_breeds: []
 # If set, only include these dog IDs. Leave empty to keep all.
 select_dog_ids: []
-
-

@@ -3,25 +3,31 @@ import torch.nn as nn
 from .cnn_head import ClassRegistry, SimplifiedTDMHead
 
 class SimplifiedTDMModelCNN(nn.Module):
-    def __init__(self, in_channels, init_num_classes, device, sparsity_ratio=0.3):
+    def __init__(self, in_channels, init_num_classes, device, sparsity_ratio, feat_dim):
         super().__init__()
         self.device = device
 
         self.backbone = nn.Sequential(
-            nn.Conv1d(in_channels, 16, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm1d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(16, 32, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=0.2),
+            nn.Conv2d(in_channels, 24, 3, stride=2, padding=1), nn.BatchNorm2d(24), nn.ReLU(inplace=True),
+            nn.Conv2d(24, 48, 3, stride=2, padding=1), nn.BatchNorm2d(48), nn.ReLU(inplace=True),
+            nn.Conv2d(48, 96, 3, stride=2, padding=1), nn.BatchNorm2d(96), nn.ReLU(inplace=True),
+            nn.Conv2d(96, 128,3, stride=2, padding=1), nn.BatchNorm2d(128),nn.ReLU(inplace=True),
+            nn.Conv2d(128,256,3, stride=2, padding=1), nn.BatchNorm2d(256),nn.ReLU(inplace=True),
         )
-        self.gap = nn.AdaptiveAvgPool1d(1)
-        self.head = SimplifiedTDMHead(32, init_num_classes, device, sparsity_ratio)
+        self.gap = nn.AdaptiveAvgPool2d(1, 1)
+        self.proj = nn.Linear(256, feat_dim)      # project to feature dim used by the head
+
+        self.head = SimplifiedTDMHead(feat_dim, init_num_classes, device, sparsity_ratio)
 
     def _features(self, x):
-        h = self.backbone(x)
-        return self.gap(h).squeeze(-1)  # (N, 32)
+        ''' 
+        x: (N, C=3, H, W)
+        returns: (N, feat_dim)
+        '''
+        h = self.backbone(x)            # (N, 256, H/32, W/32) for img_size≳160
+        h = self.gap(h).flatten(1)      # (N, 256)
+        z = self.proj(h)                # (N, feat_dim)
+        return z
 
     # for backbone training
     def forward(self, x):

@@ -101,7 +101,7 @@ def compute_normalization_stats(X_train):
     std  = X_train.std(axis=(0, 2), keepdims=True) + 1e-8
     return mean, std
 
-def set_seed(seed=42):
+def set_seed(seed):
     """Set random seeds for reproducibility across all libraries."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
