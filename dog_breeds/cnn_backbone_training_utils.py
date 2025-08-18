@@ -66,7 +66,7 @@ def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
 def train_cnn_backbone(backbone_model, backbone_data, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg, gid2breed):
     print("Training backbone model...")
     best_val_acc = 0.0
-    patience = 5
+    patience = 15
     counter = 0
     best_state = None
     epochs = cfg['backbone_epochs']
@@ -127,7 +127,7 @@ def train_cnn_backbone(backbone_model, backbone_data, backbone_optimizer, backbo
             print(f"Early stopping at epoch {epoch}: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
             break
         if epoch % 10 == 0:
-            print(f"[Backbone] epoch {epoch}: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
+            print(f"[Backbone] epoch {epoch}: train_acc={train_acc:.1f}%, val_acc={val_acc:.1f}%")
             
     
     if best_state is not None:

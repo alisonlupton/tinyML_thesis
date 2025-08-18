@@ -2,14 +2,14 @@
 
 import numpy as np
 import torch
-from utils import kd_loss_ce, make_global_to_local_map
+from utils import kd_loss_ce, make_global_to_local_map_gids
 import random
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 from utils import build_tensors
 
-def load_CIL_data(CIL_dog_data, train_tf, val_tf):
+def load_CIL_data(CIL_dog_data, train_tf, val_tf, gid2breed=None, local_to_gid=None):
 
     # Build (X_train, y_train), (X_val, y_val) tensors for the provided subset of df.
     # Expects columns: ['img_path', 'local', 'split'] in CIL_dog_data.
@@ -20,17 +20,20 @@ def load_CIL_data(CIL_dog_data, train_tf, val_tf):
     X_train, y_train = build_tensors(df_train, train_tf)
     X_val, y_val = build_tensors(df_val, val_tf)
 
-    # Print CIL class distribution
+    # Print CIL class distribution (add back in in I change seeds)
     
-    vc_tr = pd.Series(y_train.cpu().numpy()).value_counts().sort_index()
-    vc_te = pd.Series(y_val.cpu().numpy()).value_counts().sort_index()
-    print("\n--- CIL LOCAL CLASS DISTRIBUTION ---")
-    for i in range(max(vc_tr.index.max() if len(vc_tr) else -1,
-                       vc_te.index.max() if len(vc_te) else -1) + 1):
-        trn = int(vc_tr.get(i, 0))
-        tst = int(vc_te.get(i, 0))
-        print(f"  local[{i}]: {trn} train, {tst} test")
-
+    # vc_tr = pd.Series(y_train.cpu().numpy()).value_counts().sort_index()
+    # vc_te = pd.Series(y_val.cpu().numpy()).value_counts().sort_index()
+    # print("\n--- CIL LOCAL CLASS DISTRIBUTION ---")
+    # for i in range(max(vc_tr.index.max() if len(vc_tr) else -1,
+    #                    vc_te.index.max() if len(vc_te) else -1) + 1):
+    #     trn = int(vc_tr.get(i, 0))
+    #     tst = int(vc_te.get(i, 0))
+    #     # create readable prints
+    #     gid = int(local_to_gid[i].item())
+    #     name = gid2breed.get(str(gid), f"gid_{gid}")
+    #     print(f"  local[{i}] ({name}): {trn} train, {tst} test")
+       
     return X_train, y_train, X_val, y_val
 
 def seen_and_new(schedule, t):
@@ -44,7 +47,7 @@ def seen_and_new(schedule, t):
 
 def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
                               train_loader, optimizer, criterion, device,
-                              replay_buffer_q, seen_global_ids, local_to_gid, task_idx, epoch):
+                              replay_buffer_q, seen_global_ids, local_to_gid, task_idx, epoch, gid2breed=None):
     epoch_loss = 0.0
     epoch_correct = 0
     epoch_total = 0
@@ -130,7 +133,7 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
     print(f"epoch {epoch:02d} | train_acc={100*epoch_correct/epoch_total:.1f} | loss={epoch_loss/len(train_loader):.3f}")
 
         
-def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid):
+def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid, gid2breed=None):
     
         with torch.no_grad():
             total, correct = 0, 0

@@ -1,354 +1,257 @@
 # metrics.py
-
 import math
-import torch.nn as nn
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
+import torch
+import torch.nn as nn
 
-# ---------- helpers
+# ---------- helpers ----------
+def _count_params(m: nn.Module) -> int:
+    return sum(p.numel() for p in m.parameters())
 
-def conv1d_out_len(Lin: int, k: int, stride: int = 1, pad: int = 0, dilation: int = 1) -> int:
-    # PyTorch formula
-    return math.floor((Lin + 2*pad - dilation*(k - 1) - 1)/stride + 1)
-
-def sizeof_params(module: nn.Module) -> int:
-    return sum(p.numel() for p in module.parameters())
-
-def nonzero_fraction_mask_or_weight(head) -> float:
-    """
-    Prefer a binary mask (head.mask) if present; otherwise estimate from weights.
-    """
+def _nz_frac_from_head(head) -> float:
+    # prefer binary pruning mask if present
     if hasattr(head, "mask") and head.mask is not None:
         m = head.mask
         return float((m != 0).float().mean().item())
     W = head.linear.weight.data
-    # treat near-zeros as zero to avoid tiny fp noise
     return float((W.abs() > 0).float().mean().item())
 
-def format_bytes(n: float) -> str:
-    for unit in ["B","KB","MB","GB"]:
-        if n < 1024 or unit == "GB":
-            return f"{n:.2f} {unit}"
-        n /= 1024.0
+def _fmt_bytes(n: float) -> str:
+    u = ["B","KB","MB","GB","TB"]
+    i = 0
+    while n >= 1024 and i < len(u)-1:
+        n /= 1024.0; i += 1
+    return f"{n:.2f} {u[i]}"
 
-# FLOPs/MACs for 1D conv & linear (per-sample, forward)
-def conv1d_macs_per_sample(in_c: int, out_c: int, k: int, Lout: int) -> int:
-    # MACs = out_c * Lout * in_c * k
-    return int(out_c) * int(Lout) * int(in_c) * int(k)
+def _conv2d_out_hw(H: int, W: int, k: int, s: int, p: int, d: int) -> Tuple[int,int]:
+    Hout = math.floor((H + 2*p - d*(k-1) - 1)/s + 1)
+    Wout = math.floor((W + 2*p - d*(k-1) - 1)/s + 1)
+    return Hout, Wout
 
-def linear_macs_per_sample(in_dim: int, out_dim: int, nonzero_frac: float = 1.0) -> int:
-    # dense MACs; scale by nonzero fraction to reflect head sparsity at inference
-    return int(in_dim * out_dim * nonzero_frac)
-
-@dataclass
-class CILResourceReport:
-    # parameter counts
-    params_backbone: int
-    params_head_dense: int
-    params_total_dense: int
-    head_nonzero_frac: float
-
-    # deployment (flash) bytes (assuming int8 for both backbone and head)
-    flash_backbone_int8: int
-    flash_head_int8_dense: int
-    flash_head_int8_sparse: int
-    flash_total_int8_dense: int
-    flash_total_int8_sparse: int
-
-    # training SRAM estimates (bytes) – head-only training
-    train_weights_head_fp32: int
-    train_grads_head_fp32: int
-    train_opt_states_head_fp32: int
-    train_activations_head_fp32: int
-    replay_buffer_bytes: int
-    replay_buffer_bytes_per_example: int
-    train_sram_total_bytes: int
-
-    # inference SRAM (peak activation buffer, bytes)
-    infer_peak_activation_bytes_b1: int
-
-    # compute (MACs/FLOPs)
-    forward_macs_backbone_per_sample: int
-    forward_macs_head_per_sample_dense: int
-    forward_macs_head_per_sample_sparse: int
-    forward_macs_total_dense_per_sample: int
-    forward_macs_total_sparse_per_sample: int
-    train_macs_per_batch_dense: int
-    train_macs_per_batch_sparse: int
-    forward_flops_total_sparse_per_sample: int
-    train_flops_per_batch_sparse: int
-
-    # shapes
-    conv_lengths: Tuple[int, ...]   # all conv output lengths, e.g., (L1, L2)
-    head_in_dim: int
-    head_out_dim: int
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        # d_pretty = {
-        #     **d,
-        #     "flash_backbone_int8_pretty": format_bytes(self.flash_backbone_int8),
-        #     "flash_head_int8_dense_pretty": format_bytes(self.flash_head_int8_dense),
-        #     "flash_head_int8_sparse_pretty": format_bytes(self.flash_head_int8_sparse),
-        #     "flash_total_int8_dense_pretty": format_bytes(self.flash_total_int8_dense),
-        #     "flash_total_int8_sparse_pretty": format_bytes(self.flash_total_int8_sparse),
-        #     "train_weights_head_fp32_pretty": format_bytes(self.train_weights_head_fp32),
-        #     "train_grads_head_fp32_pretty": format_bytes(self.train_grads_head_fp32),
-        #     "train_opt_states_head_fp32_pretty": format_bytes(self.train_opt_states_head_fp32),
-        #     "train_activations_head_fp32_pretty": format_bytes(self.train_activations_head_fp32),
-        #     "replay_buffer_bytes_pretty": format_bytes(self.replay_buffer_bytes),
-        #     "train_sram_total_bytes_pretty": format_bytes(self.train_sram_total_bytes),
-        #     "infer_peak_activation_bytes_b1_pretty": format_bytes(self.infer_peak_activation_bytes_b1),
-        #     "replay_buffer_bytes_per_example_pretty": format_bytes(self.replay_buffer_bytes_per_example),
-        # }
-        return d
-
-
-def _sequential_conv1d_lengths(backbone: nn.Module, C: int, L: int) -> Tuple[List[Tuple[int,int,int,int,int]], Tuple[int, ...]]:
-    """
-    Walk backbone, collect Conv1d layers (in_c, out_c, k, stride, pad, dilation) and compute
-    the sequence of output lengths starting from input length L.
-    Returns:
-      conv_specs: list of tuples (in_c, out_c, k, stride, pad, dilation)
-      Louts: tuple of conv output lengths (L1, L2, ...)
-    """
-    conv_specs = []
+def _scan_conv2d_specs(backbone: nn.Module):
+    """Return list of (Cin, Cout, k, s, p, d) in backbone order for Conv2d only."""
+    specs = []
     for m in backbone.modules():
-        if isinstance(m, nn.Conv1d):
+        if isinstance(m, nn.Conv2d):
             k = m.kernel_size if isinstance(m.kernel_size, int) else m.kernel_size[0]
             s = m.stride if isinstance(m.stride, int) else m.stride[0]
             p = m.padding if isinstance(m.padding, int) else m.padding[0]
             d = m.dilation if isinstance(m.dilation, int) else m.dilation[0]
-            conv_specs.append((m.in_channels, m.out_channels, k, s, p, d))
+            specs.append((m.in_channels, m.out_channels, int(k), int(s), int(p), int(d)))
+    return specs
 
-    Louts: List[int] = []
-    curL = int(L)
-    for (_, _, k, s, p, d) in conv_specs:
-        curL = conv1d_out_len(curL, k=k, stride=s, pad=p, dilation=d)
-        Louts.append(curL)
-    return conv_specs, tuple(Louts)
+@dataclass
+class CILProfile2D:
+    # params
+    backbone_params: int
+    head_params: int
+    total_params: int
+    head_nonzero_frac: float
 
+    # deployment memory (int8 weights, unless cfg overrides)
+    deployed_backbone_MB: float
+    deployed_head_dense_MB: float
+    deployed_head_sparse_MB: float
+    deployed_total_dense_MB: float
+    deployed_total_sparse_MB: float
 
-def profile_cil_resources(
-    cfg, 
-    model: nn.Module,
-    C: int, L: int,                     # C = sensor channels, L = window_len (NOT num classes)
-    batch_size_train: int = 16,
-    batch_size_infer: int = 1,
-    replay_size: int = 5000,
-    optimizer_kind: str = "adam",       # "adam" or "sgd"
-    deployed_bits_backbone: int = 8,
-    deployed_bits_classifier: int = 8,
-    training_bits_classifier: int = 32,
-    replay_bits: int = 8,               # INT8 latent replay
-    activation_bits_train: int = 32,
-    activation_bits_infer: int = 8,
-    # --- NEW knobs to reflect your current training loop:
-    replay_batch_size: int = 1,         # number of replay samples per step
-    kd_prev_rows: int = 0,              # prev_num (teacher rows); 0 if no KD this task
-    kd_enabled: bool = True,            # whether KD path is active
-    autograd_grad_for_cwi: bool = True  # True = use autograd.grad(live) [+grad(replay if any)]
-) -> CILResourceReport:
+    # training SRAM (head-only training, fp32 unless cfg overrides)
+    head_weights_MB: float
+    head_grads_MB: float
+    head_opt_MB: float
+    cwi_buffers_MB: float
+    mask_MB: float
+    teacher_snapshot_MB: float
+    replay_total_MB: float
+    replay_per_sample_B: int
+    activations_train_MB: float  # head-only training → features buffer
+
+    # inference SRAM (peak working set for B=1)
+    activations_infer_MB: float
+
+    # compute
+    macs_backbone_per_sample_M: float
+    macs_proj_per_sample_M: float
+    macs_head_per_sample_dense_M: float
+    macs_head_per_sample_sparse_M: float
+    macs_total_fwd_sparse_per_sample_M: float
+    macs_train_per_batch_sparse_M: float
+
+    # shapes
+    final_feat_hw: Tuple[int,int]
+    proj_in_channels: int
+    feat_dim: int
+    head_out_dim: int
+
+    def pretty(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d.update({
+            "deployed_total_sparse_pretty": _fmt_bytes(self.deployed_total_sparse_MB * 1024**2),
+            "replay_total_pretty": _fmt_bytes(self.replay_total_MB * 1024**2),
+            "activations_train_pretty": _fmt_bytes(self.activations_train_MB * 1024**2),
+            "activations_infer_pretty": _fmt_bytes(self.activations_infer_MB * 1024**2),
+        })
+        return d
+
+def profile_cil_resources_2d(cfg: Dict[str, Any], model: nn.Module) -> CILProfile2D:
     """
-    Updated profiler for your CIL phase with SparCL-style head:
-      - Frozen backbone (no backward through backbone).
-      - Linear head trains in FP32 with binary mask (sparsity).
-      - Replay buffer stores INT8 latent + FP32 scale + int16 label.
-      - CWI buffers (cwi, cwi_curr, cwi_mem) and mask are persistent FP32 tensors.
-      - Optional KD/DDR: teacher snapshot + extra backbone fwd + partial head fwd.
-      - Extra backward equivalents for autograd.grad on live/replay losses (for CWI).
+    Profiles your EXACT 2D pipeline (frozen backbone + linear head) using ONLY values from cfg.
+    Call this before tasks (and optionally inside each task after you update cfg['kd_prev_rows']).
     """
-    if L <= 0:
-        raise ValueError("L must be the temporal window length (>0).")
-    if L <= 8:
-        print("[metrics] Warning: L is very small. Make sure you're passing the window length, not num classes.")
+    assert hasattr(model, "backbone") and hasattr(model, "gap") and hasattr(model, "proj") and hasattr(model, "head")
 
-    assert hasattr(model, "backbone") and hasattr(model, "head"), "Model must expose .backbone and .head"
-    head = model.head
-    in_dim = int(getattr(head, "in_dim"))
-    out_dim = int(getattr(head, "out_dim"))
+    # -------- read knobs from cfg (with fallbacks) --------
+    img_size                 = int(cfg['img_size'])
+    batch_size_train         = int(cfg['CIL_batch_size_train'])
+    batch_size_infer         = int(cfg.get("CIL_batch_size_test", 32))
+    replay_size              = int(cfg.get("buffer_size", 3000))
+    optimizer_kind           = str(cfg.get("optimizer", "adam"))
+    deployed_bits_backbone   = int(cfg.get("deployed_bits_backbone", 32))
+    deployed_bits_classifier = int(cfg.get("deployed_bits_classifier", 32))
+    training_bits_classifier = int(cfg.get("training_bits_classifier", 32))
+    replay_bits              = int(cfg.get("replay_bits", 8))
+    activation_bits_train    = int(cfg.get("activation_bits_train", 32))  # you are training in PyTorch; 32 is safe
+    activation_bits_infer    = int(cfg.get("activation_bits_infer", 32))
+    replay_batch_size        = int(cfg.get("replay_batch_size", 1))
+    kd_prev_rows             = int(cfg.get("kd_prev_rows", 0))     # set this in-loop if KD active
+    kd_enabled               = bool(cfg.get("kd_enabled", True))
+    autograd_grad_for_cwi    = bool(cfg.get("autograd_grad_for_cwi", True))
+    metrics_path             = cfg.get("metrics_path", None)
 
-    # ---------- sparsity
-    head_nonzero = nonzero_fraction_mask_or_weight(head)
+    # ----- params -----
+    bb_params   = _count_params(model.backbone) + _count_params(model.gap) + _count_params(model.proj)
+    head_params = _count_params(model.head)
+    total_params = bb_params + head_params
 
-    # ---------- params
-    params_backbone = sizeof_params(model.backbone)
-    numel_w = head.linear.weight.numel()
-    numel_b = head.linear.bias.numel() if head.linear.bias is not None else 0
-    params_head_dense = numel_w + numel_b
-    params_total_dense = params_backbone + params_head_dense
+    in_dim  = int(model.head.in_dim)   # feat_dim
+    out_dim = int(model.head.out_dim)
+    nz_frac = _nz_frac_from_head(model.head)
 
-    # ---------- flash (INT8 weights)
-    bytes_per_w_backbone = deployed_bits_backbone // 8
-    bytes_per_w_head = deployed_bits_classifier // 8
+    # ----- deployment memory (assume int8 for both unless overridden) -----
+    bb_MB          = bb_params   * (deployed_bits_backbone   / 8) / 1_048_576
+    head_MB_dense  = head_params * (deployed_bits_classifier / 8) / 1_048_576
+    # sparse head: weight zeros removed, bias kept
+    num_w = model.head.linear.weight.numel()
+    num_b = model.head.linear.bias.numel() if model.head.linear.bias is not None else 0
+    head_MB_sparse = ((num_w * nz_frac) + num_b) * (deployed_bits_classifier / 8) / 1_048_576
+    tot_MB_dense   = bb_MB + head_MB_dense
+    tot_MB_sparse  = bb_MB + head_MB_sparse
 
-    flash_backbone_int8 = params_backbone * bytes_per_w_backbone
-    flash_head_int8_dense = (numel_w + numel_b) * bytes_per_w_head
-    flash_total_int8_dense = flash_backbone_int8 + flash_head_int8_dense
+    # ----- compute MACs per sample (follow your real backbone) -----
+    H = W = int(img_size)
+    conv_specs = _scan_conv2d_specs(model.backbone)
+    macs_bb = 0
+    peak_act_elems_infer = 3 * H * W  # input as a candidate
+    last_out_C = None
 
-    flash_head_int8_sparse = int(numel_w * head_nonzero * bytes_per_w_head) + numel_b * bytes_per_w_head
-    flash_total_int8_sparse = flash_backbone_int8 + flash_head_int8_sparse
+    for Cin, Cout, k, s, p, d in conv_specs:
+        H, W = _conv2d_out_hw(H, W, k, s, p, d)
+        macs_bb += H * W * Cout * (Cin * k * k)
+        peak_act_elems_infer = max(peak_act_elems_infer, Cout * H * W)
+        last_out_C = Cout
 
-    # ---------- conv MACs
-    conv_specs, Louts = _sequential_conv1d_lengths(model.backbone, C, L)
-    macs_backbone_fwd = 0
-    for (in_c, out_c, k, s, p, d), Lout in zip(conv_specs, Louts):
-        macs_backbone_fwd += conv1d_macs_per_sample(in_c, out_c, k, Lout)
+    final_hw = (H, W)
+    # GAP → (C, 1, 1), then proj last_out_C → feat_dim
+    proj_in = int(last_out_C if last_out_C is not None else 256)
+    macs_proj = proj_in * in_dim
+    macs_head_dense  = in_dim * out_dim
+    macs_head_sparse = int(in_dim * out_dim * nz_frac)
+    macs_total_sparse = macs_bb + macs_proj + macs_head_sparse
 
-    # head MACs per sample
-    macs_head_fwd_dense  = linear_macs_per_sample(in_dim, out_dim, nonzero_frac=1.0)
-    macs_head_fwd_sparse = linear_macs_per_sample(in_dim, out_dim, nonzero_frac=head_nonzero)
-
-    macs_total_fwd_dense  = macs_backbone_fwd + macs_head_fwd_dense
-    macs_total_fwd_sparse = macs_backbone_fwd + macs_head_fwd_sparse
-
-    # ---------- base training MACs (original approximation)
-    # Old: batch_size_train * (fwd_total + 2*head_fwd)  [2x for backward on head]
-    # New:
-    #  - Live forward: backbone + head (sparse) on B
-    #  - Replay forward: head (sparse) on R (no backbone)
-    #  - Backward equivalents on head:
-    #       * +1 (final loss.backward)
-    #       * +1 (autograd.grad on live_loss) if autograd_grad_for_cwi
-    #       * +1 (autograd.grad on replay_loss) if autograd_grad_for_cwi AND replay used
-    #  - KD (optional): extra backbone forward on B + partial head forward (in_dim x prev_rows)
+    # ----- training MACs per batch (head-only training) -----
     B = int(batch_size_train)
     R = int(max(0, replay_batch_size))
-    use_replay_in_step = R > 0  # your loop tries replay each step if available
-
-    # live forward
-    macs_live_fwd = B * (macs_backbone_fwd + macs_head_fwd_sparse)
-    # replay forward (head only)
-    macs_replay_fwd = R * macs_head_fwd_sparse
-
-    # backward multiplier on head
+    # live forward: backbone+proj+head (sparse)
+    macs_live  = B * (macs_bb + macs_proj + macs_head_sparse)
+    # replay forward: head only
+    macs_replay = R * macs_head_sparse
+    # backward equivalents on head
     head_bwd_equiv = 1  # final loss.backward
     if autograd_grad_for_cwi:
-        head_bwd_equiv += 1           # extra grad for live_loss
-        if use_replay_in_step:
-            head_bwd_equiv += 1       # extra grad for replay_loss
-
-    macs_head_backward = head_bwd_equiv * (B * macs_head_fwd_sparse)
-
-    # KD/DDR compute
+        head_bwd_equiv += 1            # extra grad(live)
+        if R > 0:
+            head_bwd_equiv += 1        # extra grad(replay)
+    macs_head_bwd = head_bwd_equiv * (B * macs_head_sparse)
+    # KD/DDR: extra backbone+proj on live (feats recomputed) + partial head over prev rows
     macs_kd = 0
     if kd_enabled and kd_prev_rows > 0:
-        # extra backbone forward on live batch (you call model._features again)
-        macs_kd += B * macs_backbone_fwd
-        # partial head forward over prev rows
-        macs_head_prev_rows = linear_macs_per_sample(in_dim, kd_prev_rows, nonzero_frac=head_nonzero)
-        macs_kd += B * macs_head_prev_rows
+        macs_kd += B * (macs_bb + macs_proj)
+        macs_kd += B * (in_dim * kd_prev_rows)
+    macs_train_batch_sparse = macs_live + macs_replay + macs_head_bwd + macs_kd
 
-    macs_train_per_batch_sparse = macs_live_fwd + macs_replay_fwd + macs_head_backward + macs_kd
-    macs_train_per_batch_dense  = macs_live_fwd + macs_replay_fwd + head_bwd_equiv * (B * macs_head_fwd_dense) + (
-        B * macs_backbone_fwd + B * linear_macs_per_sample(in_dim, kd_prev_rows, nonzero_frac=1.0) if (kd_enabled and kd_prev_rows > 0) else 0
-    )
-
-    flops_fwd_total_sparse_per_sample = 2 * macs_total_fwd_sparse
-    flops_train_per_batch_sparse      = 2 * macs_train_per_batch_sparse
-
-    # ---------- training SRAM (persistent)
-    bytes_per_fp_train = training_bits_classifier // 8
-    w_bytes = params_head_dense * bytes_per_fp_train
-    g_bytes = params_head_dense * bytes_per_fp_train
-
-    # optimizer state
-    ok = optimizer_kind.lower()
-    if ok == "adam":
-        opt_bytes = 2 * params_head_dense * bytes_per_fp_train   # m & v
-    elif ok in ("sgd", "sgd_momentum", "momentum"):
-        opt_bytes = 1 * params_head_dense * bytes_per_fp_train
+    # ----- SRAM: head-only training persistent (fp32 unless overridden) -----
+    bpp = training_bits_classifier / 8
+    w_bytes   = head_params * bpp
+    g_bytes   = head_params * bpp
+    if optimizer_kind.lower() == "adam":
+        opt_bytes = 2 * head_params * bpp
+    elif optimizer_kind.lower() in ("sgd","sgd_momentum","momentum"):
+        opt_bytes = 1 * head_params * bpp
     else:
         opt_bytes = 0
 
-    # head activations needed for backward (B, in_dim) FP32
-    act_head = B * in_dim * (activation_bits_train // 8)
+    # CWI buffers (cwi, cwi_curr, cwi_mem) + mask (kept fp32 in your code)
+    cwi_bytes  = 3 * num_w * bpp
+    mask_bytes = num_w * bpp
 
-    # replay buffer memory
-    replay_feat_bytes_per_ex   = in_dim * (replay_bits // 8)
-    replay_scale_bytes_per_ex  = 4
-    replay_label_bytes_per_ex  = 2
-    replay_per_ex = replay_feat_bytes_per_ex + replay_scale_bytes_per_ex + replay_label_bytes_per_ex
-    replay_bytes  = replay_size * replay_per_ex
-
-    # NEW: persistent SparCL buffers
-    mask_bytes = numel_w * bytes_per_fp_train  # mask kept as float
-    cwi_bytes  = 3 * numel_w * bytes_per_fp_train  # cwi, cwi_curr, cwi_mem
-
-    # NEW: teacher snapshot (if used this task)
+    # teacher snapshot (if KD active)
     teacher_bytes = 0
     if kd_enabled and kd_prev_rows > 0:
-        # weight: prev_rows * in_dim, bias: prev_rows
-        teacher_bytes = (kd_prev_rows * in_dim + kd_prev_rows) * bytes_per_fp_train
+        teacher_bytes = (kd_prev_rows * in_dim + kd_prev_rows) * bpp
 
-    train_sram_total = w_bytes + g_bytes + opt_bytes + act_head + replay_bytes + mask_bytes + cwi_bytes + teacher_bytes
+    # replay memory (INT8 + 4-byte scale + 2-byte label) per latent
+    replay_per = int(in_dim * (replay_bits/8) + 4 + 2)
+    replay_total = replay_size * replay_per
 
-    # ---------- inference SRAM (peak activations)
-    peak_elems_candidates = [
-        batch_size_infer * C * L,
-        *[batch_size_infer * spec[1] * Lout for spec, Lout in zip(conv_specs, Louts)],
-        batch_size_infer * in_dim,
-        batch_size_infer * out_dim,
-    ]
-    peak_elems = max(peak_elems_candidates) if peak_elems_candidates else batch_size_infer * max(in_dim, out_dim)
-    infer_peak_activation_bytes_b1 = peak_elems * (activation_bits_infer // 8)
+    # training activations (head-only): features buffer (B, in_dim)
+    act_train_bytes = B * in_dim * (activation_bits_train / 8)
 
-    # ---------- pack original report (kept fields the same)
-    report = CILResourceReport(
-        params_backbone=params_backbone,
-        params_head_dense=params_head_dense,
-        params_total_dense=params_total_dense,
-        head_nonzero_frac=head_nonzero,
+    # inference activations (B=1): peak across conv outputs (already tracked)
+    act_infer_bytes = peak_act_elems_infer * (activation_bits_infer / 8)
 
-        flash_backbone_int8=flash_backbone_int8,
-        flash_head_int8_dense=flash_head_int8_dense,
-        flash_head_int8_sparse=flash_head_int8_sparse,
-        flash_total_int8_dense=flash_total_int8_dense,
-        flash_total_int8_sparse=flash_total_int8_sparse,
+    report = CILProfile2D(
+        backbone_params=bb_params,
+        head_params=head_params,
+        total_params=total_params,
+        head_nonzero_frac=nz_frac,
 
-        train_weights_head_fp32=w_bytes,
-        train_grads_head_fp32=g_bytes,
-        train_opt_states_head_fp32=opt_bytes,
-        train_activations_head_fp32=act_head,
-        replay_buffer_bytes=replay_bytes,
-        replay_buffer_bytes_per_example=replay_per_ex,
-        train_sram_total_bytes=train_sram_total,
+        deployed_backbone_MB=bb_MB,
+        deployed_head_dense_MB=head_MB_dense,
+        deployed_head_sparse_MB=head_MB_sparse,
+        deployed_total_dense_MB=tot_MB_dense,
+        deployed_total_sparse_MB=tot_MB_sparse,
 
-        infer_peak_activation_bytes_b1=infer_peak_activation_bytes_b1,
+        head_weights_MB=w_bytes/1_048_576,
+        head_grads_MB=g_bytes/1_048_576,
+        head_opt_MB=opt_bytes/1_048_576,
+        cwi_buffers_MB=cwi_bytes/1_048_576,
+        mask_MB=mask_bytes/1_048_576,
+        teacher_snapshot_MB=teacher_bytes/1_048_576,
+        replay_total_MB=replay_total/1_048_576,
+        replay_per_sample_B=replay_per,
+        activations_train_MB=act_train_bytes/1_048_576,
 
-        forward_macs_backbone_per_sample=macs_backbone_fwd,
-        forward_macs_head_per_sample_dense=macs_head_fwd_dense,
-        forward_macs_head_per_sample_sparse=macs_head_fwd_sparse,
-        forward_macs_total_dense_per_sample=macs_total_fwd_dense,
-        forward_macs_total_sparse_per_sample=macs_total_fwd_sparse,
-        train_macs_per_batch_dense=macs_train_per_batch_dense,
-        train_macs_per_batch_sparse=macs_train_per_batch_sparse,
-        forward_flops_total_sparse_per_sample=flops_fwd_total_sparse_per_sample,
-        train_flops_per_batch_sparse=flops_train_per_batch_sparse,
+        activations_infer_MB=act_infer_bytes/1_048_576,
 
-        conv_lengths=Louts,
-        head_in_dim=in_dim,
+        macs_backbone_per_sample_M=macs_bb/1_000_000,
+        macs_proj_per_sample_M=macs_proj/1_000_000,
+        macs_head_per_sample_dense_M=macs_head_dense/1_000_000,
+        macs_head_per_sample_sparse_M=macs_head_sparse/1_000_000,
+        macs_total_fwd_sparse_per_sample_M=macs_total_sparse/1_000_000,
+        macs_train_per_batch_sparse_M=macs_train_batch_sparse/1_000_000,
+
+        final_feat_hw=final_hw,
+        proj_in_channels=proj_in,
+        feat_dim=in_dim,
         head_out_dim=out_dim,
     )
 
-    # ---------- write metrics (add the new breakdown fields too)
-    d = report.to_dict()
-    d.update({
-        "train_head_mask_bytes": mask_bytes,
-        "train_cwi_bytes": cwi_bytes,
-        "teacher_snapshot_bytes": teacher_bytes,
-        "replay_batch_size": R,
-        "kd_prev_rows": kd_prev_rows,
-        "head_backward_equiv_per_batch": head_bwd_equiv,
-        "macs_live_forward_per_batch": macs_live_fwd,
-        "macs_replay_forward_per_batch": macs_replay_fwd,
-        "macs_kd_per_batch": macs_kd,
-    })
-
-    save_path = cfg['metrics_path']
-    with open(save_path, "w") as f:
-        for k, v in d.items():
-            f.write(f"{k}: {v}\n")
-    print(f"Saved CIL metrics to {save_path}")
-
+    # optional save
+    if metrics_path:
+        d = report.pretty()
+        with open(metrics_path, "w") as f:
+            for k, v in d.items():
+                f.write(f"{k}: {v}\n")
+        print(f"[metrics] Saved 2D CIL profile to {metrics_path}")
     return report

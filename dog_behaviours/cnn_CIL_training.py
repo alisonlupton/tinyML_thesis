@@ -109,9 +109,6 @@ def main():
         param.requires_grad = False
         
     cil_model.backbone.eval()
-    for m in cil_model.backbone.modules():
-        if isinstance(m, nn.BatchNorm1d):
-            m.track_running_stats = False  # fully freeze
     
     #####################################################################################################################        
     #--------------------------------------- STEP 4: SET UP CIL SCENARIO
@@ -240,9 +237,6 @@ def main():
             # Ensure frozen
             cil_model.head.train()
             cil_model.backbone.eval()
-            for m in cil_model.backbone.modules():
-                if isinstance(m, nn.BatchNorm1d):
-                    m.track_running_stats = False  # can repeat
             
             # Learning rate scheduling
             if epoch == 5:

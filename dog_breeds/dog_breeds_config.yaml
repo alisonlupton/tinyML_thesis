@@ -5,27 +5,26 @@ cleaned_data_path_json: "../data/dog_breed_data/stanford_dogs_index.json"
 tasks_dir: "../data/dog_breed_data/tasks"
 
 # Image
-img_size: 160 # can also try 192
+img_size: 192 # can also try 192
 use_bbox: false # can put to true and say I will crop offline
+feat_dim: 128
 
 # General Training
 random_seed: 42
-num_pretrain_dogs: 10
-# backbone_val_dog: 48
+num_pretrain_dogs: 5
 num_cil_dogs_per_task: 1 # can add more to make harder
 num_tasks: 3 # can add more to make harder
 
 # Backbone training
-backbone_learning_rate: 0.001
-backbone_weight_decay: 0.0001
-backbone_epochs: 50
+backbone_learning_rate: 0.0003 # was 0.0005, can try 0.0001
+backbone_weight_decay: 0.001
+backbone_epochs: 100
 backbone_batch_size_train: 32
 backbone_batch_size_val: 32
 
 # CIL training
-buffer_size: 5000
+buffer_size: 3000
 sparsity_ratio: 0.3
-feat_dim: 256
 CIL_batch_size_train: 1
 replay_batch_size: 1 # tends to match the live batch size, but can tune this
 CIL_batch_size_test: 1

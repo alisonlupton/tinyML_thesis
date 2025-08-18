@@ -6,16 +6,18 @@ class SimplifiedTDMModelCNN(nn.Module):
     def __init__(self, in_channels, init_num_classes, device, sparsity_ratio, feat_dim):
         super().__init__()
         self.device = device
-
+        # note that when set in .eval() the dropout is identity
         self.backbone = nn.Sequential(
-            nn.Conv2d(in_channels, 24, 3, stride=2, padding=1), nn.BatchNorm2d(24), nn.ReLU(inplace=True),
-            nn.Conv2d(24, 48, 3, stride=2, padding=1), nn.BatchNorm2d(48), nn.ReLU(inplace=True),
-            nn.Conv2d(48, 96, 3, stride=2, padding=1), nn.BatchNorm2d(96), nn.ReLU(inplace=True),
-            nn.Conv2d(96, 128,3, stride=2, padding=1), nn.BatchNorm2d(128),nn.ReLU(inplace=True),
-            nn.Conv2d(128,256,3, stride=2, padding=1), nn.BatchNorm2d(256),nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, 24, 3, stride=2, padding=1), nn.BatchNorm2d(24), nn.ReLU(inplace=True), nn.Dropout2d(0.1),
+            nn.Conv2d(24, 48, 3, stride=2, padding=1), nn.BatchNorm2d(48), nn.ReLU(inplace=True), nn.Dropout2d(0.1),
+            nn.Conv2d(48, 96, 3, stride=2, padding=1), nn.BatchNorm2d(96), nn.ReLU(inplace=True), nn.Dropout2d(0.2),
+            nn.Conv2d(96, 128, 3, stride=2, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True), nn.Dropout2d(0.2),
         )
-        self.gap = nn.AdaptiveAvgPool2d(1, 1)
-        self.proj = nn.Linear(256, feat_dim)      # project to feature dim used by the head
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        self.proj = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(128, feat_dim)
+        )      # project to feature dim used by the head
 
         self.head = SimplifiedTDMHead(feat_dim, init_num_classes, device, sparsity_ratio)
 
@@ -24,8 +26,9 @@ class SimplifiedTDMModelCNN(nn.Module):
         x: (N, C=3, H, W)
         returns: (N, feat_dim)
         '''
-        h = self.backbone(x)            # (N, 256, H/32, W/32) for img_size≳160
-        h = self.gap(h).flatten(1)      # (N, 256)
+
+        h = self.backbone(x)            # (N, 128, H/16, W/16) for img_size≳160
+        h = self.gap(h).flatten(1)      # (N, 128)
         z = self.proj(h)                # (N, feat_dim)
         return z
 

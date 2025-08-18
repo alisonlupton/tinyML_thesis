@@ -59,11 +59,16 @@ def process_dog_data(cfg):
 
     
     backbone_dogs = get_backbone_dogs(cfg, all_gids)
-    print(f"Backbone dogs chosen: {backbone_dogs}")
+    print("Backbone Dogs Chosen:")
+    for i in backbone_dogs:
+        print(f"GID: {i}, BREED: {gid2breed[str(i)]}") 
     
     schedule = create_tasks(cfg, all_gids,
                              backbone_dogs)
-    print(f"Task Schedule: {schedule}")
+    
+    print("CIL Schedule Created:")
+    for idx, task in enumerate(schedule):
+        print(f"Task {idx}, GID: {task[0]}, BREED: {gid2breed[str(task[0])]}") 
     
   
     # Save metadata/summary

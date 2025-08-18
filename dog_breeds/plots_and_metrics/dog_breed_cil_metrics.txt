@@ -1,0 +1,33 @@
+backbone_params: 180480
+head_params: 774
+total_params: 181254
+head_nonzero_frac: 0.7005208134651184
+deployed_backbone_MB: 0.6884765625
+deployed_head_dense_MB: 0.00295257568359375
+deployed_head_sparse_MB: 0.002075195254292339
+deployed_total_dense_MB: 0.6914291381835938
+deployed_total_sparse_MB: 0.6905517577542923
+head_weights_MB: 0.00295257568359375
+head_grads_MB: 0.00295257568359375
+head_opt_MB: 0.0059051513671875
+cwi_buffers_MB: 0.0087890625
+mask_MB: 0.0029296875
+teacher_snapshot_MB: 0.0
+replay_total_MB: 0.3833770751953125
+replay_per_sample_B: 134
+activations_train_MB: 0.00048828125
+activations_infer_MB: 0.84375
+macs_backbone_per_sample_M: 69.67296
+macs_proj_per_sample_M: 0.016384
+macs_head_per_sample_dense_M: 0.000768
+macs_head_per_sample_sparse_M: 0.000537
+macs_total_fwd_sparse_per_sample_M: 69.689881
+macs_train_per_batch_sparse_M: 69.692029
+final_feat_hw: (12, 12)
+proj_in_channels: 128
+feat_dim: 128
+head_out_dim: 6
+deployed_total_sparse_pretty: 707.12 KB
+replay_total_pretty: 392.58 KB
+activations_train_pretty: 512.00 B
+activations_infer_pretty: 864.00 KB
