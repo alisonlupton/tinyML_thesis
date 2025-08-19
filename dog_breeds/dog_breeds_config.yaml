@@ -11,10 +11,10 @@ feat_dim: 128
 
 # General Training
 random_seed: 42
-num_pretrain_dogs: 5
+num_pretrain_dogs: 10
 num_cil_dogs_per_task: 1 # can add more to make harder
 num_tasks: 3 # can add more to make harder
-
+ 
 # Backbone training
 backbone_learning_rate: 0.0003 # was 0.0005, can try 0.0001
 backbone_weight_decay: 0.001
@@ -39,6 +39,7 @@ cwi_beta: 1.0
 cwi_ema: 0.9 # optional, not in SparCL
 metrics_path: "plots_and_metrics/dog_breed_cil_metrics.txt"
 plot_dir: "plots_and_metrics"
+
 
 # If set, only include these breeds (names must match DogInfo.xlsx). Leave empty to keep all.
 select_breeds: []

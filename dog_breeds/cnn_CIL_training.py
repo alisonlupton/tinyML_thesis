@@ -71,7 +71,7 @@ def main():
 
     backbone_data = load_data_cnn_backbone(cfg, backbone_gids, full_df)
     
-    # Create data loaders
+    # Create backbone data loaders
     backbone_train_loader = DataLoader(TensorDataset(backbone_data.X_train, backbone_data.y_train), batch_size=cfg['backbone_batch_size_train'], shuffle=True)
     backbone_val_loader = DataLoader(TensorDataset(backbone_data.X_val, backbone_data.y_val), batch_size=cfg['backbone_batch_size_val'], shuffle=False)
     
@@ -152,7 +152,7 @@ def main():
  
         # 1) Prepare task data and do cold evaluation
         gid_to_local, seen_df, task_local_to_gid = build_seen_df(full_df, seen_plus_backbone)
-        X_train, y_train, X_test, y_test = load_CIL_data(seen_df, backbone_data.train_tf, backbone_data.val_tf, gid2breed, task_local_to_gid)
+        X_train, y_train, X_test, y_test = load_CIL_data(seen_df, backbone_data.CIL_train_tf, backbone_data.val_tf, gid2breed, task_local_to_gid)
         
         task_train_loader = DataLoader(
             TensorDataset(X_train, y_train),
@@ -163,7 +163,10 @@ def main():
             batch_size=cfg['CIL_batch_size_test'], shuffle=False
         )
         #------ Cold evaluation on backbone
-        cold_overall, cold_per_class = eval_new_classes_on_backbone(backbone_model, task_test_loader, task_local_to_gid, backbone_registry, device)
+        cold_overall, cold_per_class = eval_new_classes_on_backbone(backbone_model,
+                                                                    task_train_loader, task_test_loader,
+                                                                    device, len(seen_plus_backbone))
+                                                                
         print(f"[Pre-Task Eval] Overall Untrained Backbone Accuracy: {cold_overall:.1f}%")
         #TODO: potentially change this to update model each task!
         local = gid_to_local[new_gids[0]]
