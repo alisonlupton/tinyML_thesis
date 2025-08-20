@@ -69,7 +69,14 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
         batch_y_local = batch_y_local.to(device)
         
         # ---- compute features 
-        feats_batch = model._features(batch_x)
+        # Ensure backbone and proj are in eval mode to avoid BatchNorm issues
+        model.backbone.eval()
+        model.proj.eval()
+        with torch.no_grad():
+            feats_batch = model._features(batch_x)
+        # Set backbone back to eval mode (it should stay frozen anyway)
+        model.backbone.eval()
+        model.proj.eval()
 
         # ---- forward: live
         # check should this be model.head or model.forward_task ???/
@@ -146,6 +153,9 @@ def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid, gid2b
             for xb, yb_local in test_loader:
                 xb, yb_local = xb.to(device), yb_local.to(device)
                 # Make a local label vector for seen_classes 0..len(seen)-1
+                # Ensure backbone and proj are in eval mode
+                model.backbone.eval()
+                model.proj.eval()
                 feats = model._features(xb)
                 logits_seen = model.head.forward_rows(feats, rows_seen)
                 pred = logits_seen.argmax(dim=1)

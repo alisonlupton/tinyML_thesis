@@ -23,7 +23,40 @@ from models.cnn import SimplifiedTDMModelCNN
 
 
 from pathlib import Path
+###UTILS
+def kd_loss(s_logits, t_logits, T=4.0):
+    return (T*T) * F.kl_div(
+        F.log_softmax(s_logits/T, dim=1),
+        F.softmax(t_logits/T, dim=1),
+        reduction="batchmean"
+    )
 
+# Contrastive (InfoNCE) between student feats and teacher feats (both 128-D)
+# Positives: (i,i). Negatives: (i,j!=i) within batch.
+def crd_loss(s_feat, t_feat, tau=0.07):
+    s = F.normalize(s_feat, dim=1)
+    t = F.normalize(t_feat, dim=1)
+    logits = s @ t.t() / tau                 # (N,N)
+    labels = torch.arange(s.size(0), device=s.device)
+    return F.cross_entropy(logits, labels)
+
+# Relational (Affinity/Gram) — match pairwise cosine sims within the batch
+def gram_rel_loss(s_feat, t_feat):
+    s = F.normalize(s_feat, dim=1)
+    t = F.normalize(t_feat, dim=1)
+    # Gram: G = X X^T (cosine since normalized)
+    Gs = s @ s.t()
+    Gt = t @ t.t()
+    # stop gradients through teacher gram
+    return F.mse_loss(Gs, Gt)
+
+# Prototype pull — pull student feats to teacher class centroid
+def proto_loss(s_feat, y, centroids_device):
+    target = centroids_device[y]             # (N, D)
+    # cosine distance is scale-invariant and works better across nets
+    s = F.normalize(s_feat, dim=1)
+    t = F.normalize(target,   dim=1)
+    return 1.0 - F.cosine_similarity(s, t, dim=1).mean()
 def canon_key(p: str) -> str:
     """Make a stable key relative to Images/ directory."""
     parts = Path(p).parts
@@ -53,16 +86,13 @@ def canon_key_from_path(p: str) -> str:
     return "/".join(rel).replace("\\", "/")
 
 def build_cache_maps(cache: dict):
-    """
-    Build dicts for fast lookup by canonical key.
-    """
     keys   = [k.replace("\\","/") for k in cache["keys"]]
-    feats  = cache["features"]          # Tensor [N, 1280]
-    logits = cache["logits"]            # Tensor [N, B]
-    y      = cache["y_local"]           # Tensor [N]
-    map_ft     = {k: feats[i]  for i,k in enumerate(keys)}
-    map_logits = {k: logits[i] for i,k in enumerate(keys)}
-    map_y      = {k: int(y[i]) for i,k in enumerate(keys)}
+    logits = cache["logits"]            # [N, B]
+    y      = cache["y_local"]           # [N]
+    fts    = cache["feat_targets"]      # [N, feat_dim]  <-- use precomputed targets
+    map_logits = {k: logits[i]     for i,k in enumerate(keys)}
+    map_y      = {k: int(y[i])     for i,k in enumerate(keys)}
+    map_ft     = {k: fts[i]        for i,k in enumerate(keys)}  # feat targets, not 1280-D penults!
     return map_ft, map_logits, map_y
 # --- dataset that uses cached teacher targets ----------------
 from torch.utils.data import Dataset
@@ -132,15 +162,17 @@ CFG = {
     "batch_size_val": 128,
     "epochs": 100,
     "patience": 7,
-    "lr": 3e-4,
+    "lr": 1e-3,
     "weight_decay": 1e-4,
     "label_smoothing": 0.05,
 
     # distillation losses
-    "kd_T": 2.0,
+    "kd_T": 4.0,
     "alpha_kd": 1.0,     # KL(s||t)
-    "alpha_ce": 0.5,     # CE(y_true)
+    "alpha_ce": 0.0,     # CE(y_true)
     "mu_feat": 0.5,      # MSE(student_feat, target_feat)
+    "use_feat_mse": True,
+    "alpha_mse": 0.1,
 
     # workers
     "num_workers": 0,
@@ -177,11 +209,8 @@ print(f"Val   cache: feats={tuple(val_cache['features'].shape)},   logits={tuple
 # -------------------------
 # 1) Build feature targets using your projector (dropout OFF)
 # -------------------------
-saved = torch.load(CFG["proj_ckpt"], map_location="cpu")
-if "proj_from_teacher_penult" not in saved:
-    raise RuntimeError("Expected key 'proj_from_teacher_penult' in projector checkpoint.")
-
-proj_sd = saved["proj_from_teacher_penult"]  # assumed Sequential(Dropout, Linear)
+saved   = torch.load(CFG["proj_ckpt"], map_location="cpu")  # ../data/student_from_cache.pth
+proj_sd = saved["proj_from_teacher_penult"]                 # state_dict of Sequential(Dropout, Linear)
 
 class LinearOnly(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -189,23 +218,36 @@ class LinearOnly(nn.Module):
         self.fc = nn.Linear(in_dim, out_dim)
     def forward(self, x): return self.fc(x)
 
-in_dim  = train_cache["features"].shape[1]                # 1280
-out_dim = proj_sd["1.weight"].shape[0]                    # feat_dim (e.g., 128)
-
-P = LinearOnly(in_dim, out_dim)
+P = LinearOnly(in_dim=train_cache["features"].shape[1],  # 1280
+               out_dim=proj_sd["1.weight"].shape[0])     # feat_dim, e.g. 128
 P.fc.weight.data.copy_(proj_sd["1.weight"])
 P.fc.bias.data.copy_(proj_sd["1.bias"])
-P.eval()
+P = P.cpu().eval()
 
 @torch.no_grad()
 def add_feat_targets(cache):
-    feats = cache["features"].float()          # [N, 1280]
-    cache["feat_targets"] = P(feats).float()   # [N, feat_dim]
+    feats = cache["features"].float()          # CPU
+    cache["feat_targets"] = P(feats).float()   # CPU -> stays CPU for dataset
     return cache
+
 
 train_cache = add_feat_targets(train_cache)
 val_cache   = add_feat_targets(val_cache)
 
+
+# teacher 128-D features you've already computed: train_cache["feat_targets"] (N, D)
+# y_local are the local labels 0..B-1
+tfeat_tr = train_cache["feat_targets"].float()     # CPU
+y_tr     = train_cache["y_local"].long()           # CPU
+num_classes = len(backbone_gids)
+feat_dim = tfeat_tr.shape[1]
+
+# compute teacher class centroids in 128-D
+centroids = torch.stack([
+    tfeat_tr[y_tr == c].mean(0) for c in range(num_classes)
+])
+# guard NaNs if any class is empty (shouldn’t happen with your 10 classes)
+centroids[torch.isnan(centroids)] = 0
 # -------------------------
 # 2) Build image dataset that looks up cached targets by path key
 # -------------------------
@@ -248,36 +290,36 @@ dl_va = DataLoader(ds_va, batch_size=CFG["batch_size_val"], shuffle=False,
 # -------------------------
 # 3) Build student tiny CNN
 # -------------------------
+# ---- build student ----
 num_classes = len(backbone_gids)
 student = SimplifiedTDMModelCNN(
     in_channels=CFG["in_channels"],
-    init_num_classes=num_classes,     # temp: head size = |backbone classes|
+    init_num_classes=num_classes,     # ok, but we'll ignore its TDM head
     device=device,
     sparsity_ratio=CFG["sparsity_ratio"],
     feat_dim=CFG["feat_dim"],
 ).to(device)
+# right after building student
 
-# We'll train with the student's own full forward (backbone→proj→head)
-# but compute additional feature loss using student._features() and student.proj
+norm = nn.LayerNorm(CFG["feat_dim"], elementwise_affine=False).to(device)
+def _zero_out_dropout(m):
+    if isinstance(m, (nn.Dropout, nn.Dropout2d)):
+        m.p = 0.0
+student.apply(_zero_out_dropout)
 
-# -------------------------
-# Losses & Optimizer
-# -------------------------
-# losses
-ce = torch.nn.CrossEntropyLoss(label_smoothing=0.05)
-def kd_loss(s_logits, t_logits, T=2.0):
-    return (T*T) * torch.nn.functional.kl_div(
-        torch.nn.functional.log_softmax(s_logits/T, dim=1),
-        torch.nn.functional.softmax(t_logits/T, dim=1),
-        reduction="batchmean"
-    )
+# # after you build `student` and `P` (and move student to device)
+# with torch.no_grad():
+#     # student.proj = nn.Sequential(Dropout, Linear(128 -> feat_dim))
+#     student.proj[1].weight.copy_(P.fc.weight.to(device))
+#     student.proj[1].bias.copy_(P.fc.bias.to(device))
 
-alpha_kd = 1.0
-alpha_ce = 0.5
-alpha_mse = 0.1   # set 0 to disable feature-MSE
-T = 2.0
+# (optional) freeze the SPARCL head so it doesn’t get touched
+for p in student.head.parameters():
+    p.requires_grad = False
+    
 
-opt = torch.optim.AdamW(student.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"])
+
+
 
 best_state, best_val, stall = None, 0.0, 0
 
@@ -285,44 +327,248 @@ best_state, best_val, stall = None, 0.0, 0
 # 4) Train loop
 # -------------------------
 print("\n[Distill from caches] KD + CE + Feature MSE (weak/deploy tfms)")
-for ep in range(CFG["epochs"]):
+
+
+def lerp(a,b,t): return a + t*(b-a)
+
+
+# move centroids to device once
+centroids_device = centroids.to(device)
+
+warmup_epochs = 50
+opt_wu = torch.optim.AdamW(
+    list(student.backbone.parameters()) + list(student.proj.parameters()),
+    lr=5e-3, weight_decay=0.0
+)
+grad_clip = 1.0
+
+for ep in range(warmup_epochs):
     student.train()
-    run_loss = 0.0
-    student.train()
-    for xb, yb, t_logits_cpu, t_feats_cpu in dl_tr:
+    run = 0.0
+    for xb, yb, _, tfeat_cpu in dl_tr:
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
-        t_logits = t_logits_cpu.to(device, non_blocking=True)  # [N, B]
-        t_feats  = t_feats_cpu.to(device, non_blocking=True)   # [N, 1280]  (feature loss)
+        tfeat = tfeat_cpu.to(device, non_blocking=True)        # teacher 128-D targets
 
-        s_logits = student(xb)            # [N, B]
-        # optional: if you want student features, expose a method
-        # s_feats = student.features(xb)  # [N, D]
+        sfeat = norm(student._features(xb))                          # (N,128)
 
-        loss = alpha_kd * kd_loss(s_logits, t_logits, T) + alpha_ce * ce(s_logits, yb)
-        # + alpha_mse * torch.nn.functional.mse_loss(s_feats, t_feats)
+        # weights: tune lightly; keep CRD modest (negatives are in-batch)
+        loss = (0.6 * (1.0 - F.cosine_similarity(
+                    F.normalize(sfeat, dim=1),
+                    F.normalize(tfeat, dim=1), dim=1).mean())
+               +0.3 * crd_loss(sfeat, tfeat, tau=0.07)
+               +0.1 * proto_loss(sfeat, yb, centroids_device))
+
+        opt_wu.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(student.backbone.parameters()) + list(student.proj.parameters()), grad_clip)
+        opt_wu.step()
+        run += float(loss.item())
+
+    # monitor alignment (cosine)
+    student.eval()
+    with torch.no_grad():
+        cs, n = 0.0, 0
+        for xb, _, _, tfeat_cpu in dl_va:
+            xb = xb.to(device); tfeat = tfeat_cpu.to(device)
+            sfeat = norm(student._features(xb))
+            cs += F.cosine_similarity(F.normalize(sfeat,dim=1), F.normalize(tfeat,dim=1), dim=1).sum().item()
+            n  += xb.size(0)
+        val_cos = cs/max(1,n)
+    print(f"[WU] ep {ep:02d} | loss={run/len(dl_tr):.3f} | val_cos={val_cos:.3f}")
+
+    # soft early-stop if alignment stalls
+    if val_cos >= 0.70:  # you were ~0.37 before; aim for ≥0.70
+        print(f"[WU] stop early at ep {ep} (val_cos={val_cos:.3f})")
+        break
+
+
+
+# ---- closed-form KD head init: student_feats -> teacher logits ----
+# collect student features on the train set (no grad)
+student.eval()
+S_list, Tlog_list, Tfeat_list = [], [], []
+with torch.no_grad():
+    for xb, _, tlog_cpu, tfeat_cpu in dl_tr:
+        xb = xb.to(device)
+        S_list.append(norm(student._features(xb)).cpu())  # (N,D)
+        Tlog_list.append(tlog_cpu.float())          # (N,C)
+        Tfeat_list.append(tfeat_cpu.float())
+
+S = torch.cat(S_list, 0)      # (N,D)
+Tlog = torch.cat(Tlog_list,0) # (N,C)
+
+# ridge regression S_aug -> Tlog
+N, D = S.shape; C = Tlog.shape[1]
+S_aug = torch.cat([S, torch.ones(N,1)], dim=1)
+lam = 1e-3
+A = S_aug.T @ S_aug + lam * torch.eye(D+1)
+B = S_aug.T @ Tlog
+Wb = torch.linalg.solve(A, B)  # (D+1, C)
+W, b = Wb[:-1].T, Wb[-1]
+
+kd_head = nn.Linear(D, C).to(device)
+with torch.no_grad():
+    kd_head.weight.copy_((W * 0.1).to(device))  # Scale weights directly
+    kd_head.bias.copy_((b * 0.1).to(device))    # Scale bias directly
+# SANITY TEST: Can student learn basic patterns?
+print("\n=== SANITY TEST ===")
+student.train(); kd_head.train()
+test_batch = next(iter(dl_tr))
+xb, yb, t_logits_cpu, t_feats_cpu = test_batch
+xb = xb.to(device, non_blocking=True)
+yb = yb.to(device, non_blocking=True)
+
+print(f"Input shape: {xb.shape}")
+print(f"Labels: {yb[:10].tolist()}")
+print(f"Teacher logits shape: {t_logits_cpu.shape}")
+print(f"Teacher logits range: [{t_logits_cpu.min():.3f}, {t_logits_cpu.max():.3f}]")
+
+# Test forward pass
+s_feats = norm(student._features(xb))
+s_logits = kd_head(s_feats)  # No scaling needed - weights are already scaled
+print(f"Student features shape: {s_feats.shape}")
+print(f"Student logits shape: {s_logits.shape}")
+print(f"Student logits range: [{s_logits.min():.3f}, {s_logits.max():.3f}]")
+
+# Test loss computation
+ce = torch.nn.CrossEntropyLoss(label_smoothing=CFG["label_smoothing"])
+
+kd_loss_val = CFG["alpha_kd"]*kd_loss(s_logits, t_logits_cpu.to(device), CFG["kd_T"])
+ce_loss_val = CFG["alpha_ce"]*ce(s_logits, yb)
+print(f"KD loss: {kd_loss_val:.3f}")
+print(f"CE loss: {ce_loss_val:.3f}")
+print("=== END SANITY TEST ===\n")
+
+opt = torch.optim.AdamW(
+    list(student.backbone.parameters()) +
+    list(student.proj.parameters()) +
+    list(kd_head.parameters()),
+    lr=1e-3, weight_decay=1e-4
+)
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=40, eta_min=1e-4)
+T = 4.0
+def logit_scale_loss(slogits, tlogits):
+    # per-sample std then mean
+    s_std = slogits.std(dim=1)
+    t_std = tlogits.std(dim=1)
+    return F.l1_loss(s_std, t_std)
+w_scale = 0.05
+fixed = next(iter(dl_va))
+fixed_x, _, fixed_tlog, _ = fixed
+fixed_x = fixed_x.to(device); fixed_tlog = fixed_tlog.to(device)
+
+w_kd   = 1.0
+w_crd  = 0.05   # was 0.2
+w_rel  = 0.05   # was 0.1
+w_proto= 0.05
+w_ce   = 0.1
+# once before training
+import collections
+cnt = collections.Counter()
+for _, _, tlog_cpu, _ in dl_tr:
+    cnt.update(tlog_cpu.argmax(1).tolist())
+freeze_k = 5
+for p in kd_head.parameters():
+    p.requires_grad = False
+    
+opt = torch.optim.AdamW(
+    list(student.backbone.parameters()) + list(student.proj.parameters()),
+    lr=1e-4, weight_decay=1e-4  # was 2e-4 - even lower LR for stability
+)
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=40, eta_min=1e-4)
+
+print("[dbg] teacher-pred train hist:", dict(cnt))
+for ep in range(60):
+    student.train(); kd_head.train()
+    run = 0.0
+    for xb, yb, tlog_cpu, tfeat_cpu in dl_tr:
+        xb = xb.to(device, non_blocking=True)
+        yb = yb.to(device, non_blocking=True)
+        tlog  = tlog_cpu.to(device, non_blocking=True)   # (N,C)
+        tfeat = tfeat_cpu.to(device, non_blocking=True)  # (N,D)
+
+        sfeat  = norm(student._features(xb))
+        slogit = kd_head(sfeat)
+        if ep < 10:
+            w_ce_now = 0.0
+        elif ep < 20:
+            w_ce_now = lerp(0.0, 0.2, (ep-10)/10)
+        else:
+            w_ce_now = 0.2
+
+        loss = (w_kd   * kd_loss(slogit, tlog, T)
+              + w_crd  * crd_loss(sfeat, tfeat, tau=0.07)
+              + w_rel  * gram_rel_loss(sfeat, tfeat)
+              + w_proto* proto_loss(sfeat, yb, centroids_device)
+              + w_ce_now   * F.cross_entropy(slogit, yb, label_smoothing=0.05)
+              + w_scale * logit_scale_loss(slogit, tlog))
+        if ep == freeze_k:
+            for p in kd_head.parameters():
+                p.requires_grad = True
+            opt = torch.optim.AdamW(
+                list(student.backbone.parameters()) +
+                list(student.proj.parameters()) +
+                list(kd_head.parameters()),
+                lr=5e-4, weight_decay=1e-4
+            )
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=40, eta_min=1e-4)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
+
+        total_params = (
+            list(student.backbone.parameters()) +
+            list(student.proj.parameters()) +
+            list(kd_head.parameters())
+        )
+        gn = torch.nn.utils.clip_grad_norm_(total_params, 1.0)
+        if ep % 5 == 0: print(f"[dbg] grad_norm≈{float(gn):.3f}")
         opt.step()
-
-        run_loss += float(loss.item())
-
-    # validation (accuracy over backbone classes)
-    student.eval()
-    v_tot = v_cor = 0
+        run += float(loss.item())
     with torch.no_grad():
-        for xb, yb, t_logits_cpu, t_feats_cpu in dl_va:
-            xb = xb.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True)
-            s_logits = student(xb)
-            v_tot += yb.size(0)
-            v_cor += (s_logits.argmax(1) == yb).sum().item()
+        s_log = kd_head(norm(student._features(fixed_x)))
+        kl_fixed = kd_loss(s_log, fixed_tlog, T)
+    print(f"[dbg] KL(val-fixed): {kl_fixed.item():.3f}")
+            
+    if ep % 3 == 0:
+        with torch.no_grad():
+            s_sample = kd_head(norm(student._features(fixed_x))).std(dim=1).mean().item()
+            t_sample = fixed_tlog.std(dim=1).mean().item()
+        print(f"[dbg] logits std (student≈{s_sample:.3f}, teacher≈{t_sample:.3f})")
+
+    # val accuracy on backbone classes
+    # --- Validation block (safe shapes/devices) ---
+    student.eval(); kd_head.eval()
+    v_tot = v_cor = 0
+    val_cos_sum = 0.0
+    val_num = 0
+
+    with torch.no_grad():
+        for xb_val, yb_val, _, tfeat_cpu_val in dl_va:
+            xb_val = xb_val.to(device)
+            yb_val = yb_val.to(device)
+            tfeat_val = tfeat_cpu_val.to(device)
+
+            sfeat_val = norm(student._features(xb_val))
+
+            # cosine only when shapes match (they should)
+            if sfeat_val.shape == tfeat_val.shape:
+                val_cos_sum += F.cosine_similarity(
+                    F.normalize(sfeat_val, dim=1),
+                    F.normalize(tfeat_val, dim=1),
+                    dim=1
+                ).sum().item()
+                val_num += sfeat_val.size(0)
+
+            logits_val = kd_head(sfeat_val)
+            v_tot += yb_val.size(0)
+            v_cor += (logits_val.argmax(1) == yb_val).sum().item()
+
+    val_cos_kd = val_cos_sum / max(1, val_num)
     v_acc = 100.0 * v_cor / max(1, v_tot)
-    print(f"val_acc={v_acc:.2f}%")
-
-    print(f"ep {ep:02d} | train_loss={run_loss/len(dl_tr):.3f} | val_acc={v_acc:.2f}%")
-
+    print(f"[dbg] feat cosine (val): {val_cos_kd:.3f}")
     if v_acc > best_val:
         best_val = v_acc
         best_state = {k: v.detach().cpu().clone() for k,v in student.state_dict().items()}
@@ -332,9 +578,21 @@ for ep in range(CFG["epochs"]):
         if stall >= CFG["patience"]:
             print(f"Early stopping at ep {ep} (best {best_val:.2f}%)")
             break
-
+        
+    with torch.no_grad():
+        st_agree = tot = 0
+        for xb, _, tlog_cpu, _ in dl_va:
+            xb = xb.to(device)
+            s_pred = kd_head(norm(student._features(xb))).argmax(1).cpu()
+            t_pred = tlog_cpu.argmax(1)
+            st_agree += (s_pred == t_pred).sum().item()
+            tot += s_pred.numel()
+        agree_pct = 100.0 * st_agree / max(1, tot)
+    print(f"[dbg] student-teacher agreement (val): {agree_pct:.2f}%")
+    print(f"[KD] ep {ep:02d} | train_loss={run/len(dl_tr):.3f} | val_acc={v_acc:.2f}%")
+    sched.step()    
 if best_state is not None:
-    student.load_state_dict(best_state, strict=True)
+    student.load_state_dict(best_state, strict=True)  
 
 # -------------------------
 # 5) Save backbone+proj for CIL
