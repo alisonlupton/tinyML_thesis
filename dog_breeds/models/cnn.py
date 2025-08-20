@@ -16,7 +16,8 @@ class SimplifiedTDMModelCNN(nn.Module):
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.proj = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(128, feat_dim)
+            nn.Linear(128, feat_dim),
+            nn.BatchNorm1d(feat_dim)  # Add BN to stabilize feature magnitudes
         )      # project to feature dim used by the head
 
         self.head = SimplifiedTDMHead(feat_dim, init_num_classes, device, sparsity_ratio)
