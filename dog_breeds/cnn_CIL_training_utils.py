@@ -64,7 +64,12 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
     gid_to_local = {int(g): i for i, g in enumerate(local_to_gid.tolist())}
     
     W = model.head.linear.weight
-    for step, (batch_x, batch_y_local) in enumerate(train_loader):
+    
+    # Add tqdm progress bar for training
+    from tqdm import tqdm
+    batch_iter = tqdm(train_loader, desc=f"Task {task_idx+1}, Epoch {epoch+1}")
+    
+    for step, (batch_x, batch_y_local) in enumerate(batch_iter):
         batch_x = batch_x.to(device)
         batch_y_local = batch_y_local.to(device)
         
@@ -73,23 +78,25 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
         model.backbone.eval()
         model.proj.eval()
         with torch.no_grad():
-            feats_batch = model._features(batch_x)
+            backbone_feats = model._features(batch_x)
+            proj_feats = model.proj(backbone_feats)  # Project to correct dimension
         # Set backbone back to eval mode (it should stay frozen anyway)
         model.backbone.eval()
         model.proj.eval()
 
         # ---- forward: live
-        # check should this be model.head or model.forward_task ???/
-        logits_live = model.head.forward_rows(feats_batch, rows_seen)
+        # Use projected features for head
+        logits_live = model.head.forward_rows(proj_feats, rows_seen)
         live_loss = criterion(logits_live, batch_y_local)
 
         # ---- forward: replay
         replay_loss = None
         if len(replay_buffer_q) > 0 and task_idx > 0:
             replay_batch_size = cfg['replay_batch_size']
-            replay_feats, replay_targets_global = replay_buffer_q.sample_q(replay_batch_size, seen_global_ids, device=device)
-            if replay_feats is not None:
-                logits_replay = model.head.forward_rows(replay_feats, rows_seen)
+            replay_backbone_feats, replay_targets_global = replay_buffer_q.sample_q(replay_batch_size, seen_global_ids, device=device)
+            if replay_backbone_feats is not None:
+                replay_proj_feats = model.proj(replay_backbone_feats)  # Project replay features
+                logits_replay = model.head.forward_rows(replay_proj_feats, rows_seen)
                 replay_local = torch.tensor(
                     [gid_to_local[int(g.item())] for g in replay_targets_global],
                     dtype=torch.long, device=device
@@ -101,9 +108,9 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
         
         #------ KD / DDR on previous classes
         if teacher is not None and prev_num > 0:
-            logits_prev = model.head.forward_rows(feats_batch, list(range(prev_num)))
+            logits_prev = model.head.forward_rows(proj_feats, list(range(prev_num)))
             with torch.no_grad():
-                teacher_logits = teacher(feats_batch)
+                teacher_logits = teacher(proj_feats)  # Teacher expects projected features
             loss += kd_loss_ce(logits_prev, teacher_logits, T=2.0, weight=kd_weight)
 
 
@@ -128,7 +135,7 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
         
         #------ add to replay
         global_targets = local_to_gid.to(device)[batch_y_local]  # vectorized: (B,) global IDs
-        replay_buffer_q.add_batch(feats_batch, global_targets) # feats batch in # (B, D) FP32    
+        replay_buffer_q.add_batch(backbone_feats, global_targets) # Store backbone features for replay    
 
         # stats
         with torch.no_grad():
@@ -136,6 +143,14 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
             epoch_total += batch_y_local.size(0)
             epoch_correct += (pred == batch_y_local).sum().item()
             epoch_loss += float(loss.item())
+            
+            # Update progress bar with current accuracy
+            current_acc = 100 * epoch_correct / epoch_total
+            current_loss = epoch_loss / (step + 1)
+            batch_iter.set_postfix({
+                'acc': f'{current_acc:.1f}%',
+                'loss': f'{current_loss:.3f}'
+            })
 
     print(f"epoch {epoch:02d} | train_acc={100*epoch_correct/epoch_total:.1f} | loss={epoch_loss/len(train_loader):.3f}")
 
@@ -156,8 +171,9 @@ def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid, gid2b
                 # Ensure backbone and proj are in eval mode
                 model.backbone.eval()
                 model.proj.eval()
-                feats = model._features(xb)
-                logits_seen = model.head.forward_rows(feats, rows_seen)
+                backbone_feats = model._features(xb)
+                proj_feats = model.proj(backbone_feats)
+                logits_seen = model.head.forward_rows(proj_feats, rows_seen)
                 pred = logits_seen.argmax(dim=1)
 
                 total += yb_local.size(0)

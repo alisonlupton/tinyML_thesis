@@ -4,7 +4,7 @@ dog_info_path: "../data/DogMoveData_csv_format/DogInfo.xlsx"
 cleaned_data_path: "../data/DogMoveData_csv_format/DogMoveData_clean.csv"
 
 # Segmenting
-min_segment_length: 50
+min_segment_length: 100
 
 # Windowing
 sample_rate_hz: 100 # every 1 second

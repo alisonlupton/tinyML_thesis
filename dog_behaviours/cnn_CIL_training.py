@@ -6,7 +6,6 @@ Simplified TDM Pipeline with Intelligent Sampling: Following SparCL paper more c
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-# from metrics/tinyml_metrics import TinyMLMetrics
 from utils import load_config, load_processed_dog_data, evaluate_all_classes, set_seed, make_global_to_local_map, ClassRegistry
 # from metrics import profile_cil_memory, print_cil_memory_report
 from metrics import profile_cil_resources
@@ -165,16 +164,16 @@ def main():
         batch_size_infer=cfg['CIL_batch_size_test'],
         replay_size=cfg['buffer_size'],
         optimizer_kind="adam",
-        deployed_bits_backbone=8,
+        deployed_bits_backbone=32,
         deployed_bits_classifier=8,
         training_bits_classifier=32,
         replay_bits=8,
         activation_bits_train=32,
-        activation_bits_infer=8,
-        replay_batch_size=cfg['replay_batch_size'],   # NEW
-        kd_prev_rows=len(backbone_behaviors),         # for Task 1 this is the teacher size
-        kd_enabled=True,                              # you do KD after Task 1
-        autograd_grad_for_cwi=True                    # you use autograd.grad for CWI
+        activation_bits_infer=32,
+        replay_batch_size=cfg['replay_batch_size'],  
+        kd_prev_rows=len(backbone_behaviors),         
+        kd_enabled=True,                              
+        autograd_grad_for_cwi=True                    
     )
     
     # TDM parameters 

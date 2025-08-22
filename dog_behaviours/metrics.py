@@ -133,24 +133,22 @@ def profile_cil_resources(
     cfg, 
     model: nn.Module,
     C: int, L: int,                     # C = sensor channels, L = window_len (NOT num classes)
-    batch_size_train: int = 16,
-    batch_size_infer: int = 1,
-    replay_size: int = 5000,
-    optimizer_kind: str = "adam",       # "adam" or "sgd"
-    deployed_bits_backbone: int = 8,
-    deployed_bits_classifier: int = 8,
-    training_bits_classifier: int = 32,
-    replay_bits: int = 8,               # INT8 latent replay
-    activation_bits_train: int = 32,
-    activation_bits_infer: int = 8,
-    # --- NEW knobs to reflect your current training loop:
-    replay_batch_size: int = 1,         # number of replay samples per step
-    kd_prev_rows: int = 0,              # prev_num (teacher rows); 0 if no KD this task
-    kd_enabled: bool = True,            # whether KD path is active
-    autograd_grad_for_cwi: bool = True  # True = use autograd.grad(live) [+grad(replay if any)]
+    batch_size_train: int,
+    batch_size_infer: int,
+    replay_size: int,
+    optimizer_kind: str,
+    deployed_bits_backbone: int,
+    deployed_bits_classifier: int,
+    training_bits_classifier: int,
+    replay_bits: int,               # INT8 latent replay
+    activation_bits_train: int,
+    activation_bits_infer: int,
+    replay_batch_size: int ,         # number of replay samples per step
+    kd_prev_rows: int,              # prev_num (teacher rows); 0 if no KD this task
+    kd_enabled: bool,            # whether KD path is active
+    autograd_grad_for_cwi: bool  # True = use autograd.grad(live) [+grad(replay if any)]
 ) -> CILResourceReport:
     """
-    Updated profiler for your CIL phase with SparCL-style head:
       - Frozen backbone (no backward through backbone).
       - Linear head trains in FP32 with binary mask (sparsity).
       - Replay buffer stores INT8 latent + FP32 scale + int16 label.
