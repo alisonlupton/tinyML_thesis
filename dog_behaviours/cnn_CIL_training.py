@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-"""
-Simplified TDM Pipeline with Intelligent Sampling: Following SparCL paper more closely
-"""
+# cnn_CIL_training.py
+
 
 import torch
 import torch.nn as nn
@@ -14,9 +12,10 @@ from cnn_backbone_training_utils import train_cnn_backbone, load_data_cnn_backbo
 import logging
 from cnn_CIL_training_utils import load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots
 from replay import BalancedQuantReplayDynamic
+from report_plotting import CILTrainingPlotter
 
 def main():
-    """Main function - exact same logic as dog_tdm.py but with intelligent sampling."""
+    """Main function"""
     # Set fixed random seeds for reproducibility
     
     # Load configuration
@@ -85,11 +84,14 @@ def main():
     backbone_optimizer = torch.optim.Adam(backbone_model.parameters(), lr=cfg['backbone_learning_rate'], weight_decay = cfg['backbone_weight_decay'])
     backbone_criterion = nn.CrossEntropyLoss()
     
+    # Initialize plotter for tracking metrics
+    plotter = CILTrainingPlotter()
+    
     #####################################################################################################################
     #--------------------------------------- STEP 2: BACKBONE TRAINING AND EVALUATION
     #####################################################################################################################
     
-    backbone_model, _ = train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg)
+    backbone_model, _ = train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg, plotter)
     
     #####################################################################################################################
     #--------------------------------------- STEP 3: SET UP CIL MODEL
@@ -266,6 +268,9 @@ def main():
         class_acc, overall_acc = CIL_post_task_eval(task_classes, test_loader, device, all_behaviors, cil_model, registry)
         accuracy_history.append(class_acc.copy())
         
+        # Add to plotter
+        task_name = cil_tasks[task_idx] if task_idx < len(cil_tasks) else f"Task_{task_idx+1}"
+        plotter.add_cil_task(task_name, class_acc, overall_acc)
         
         if task_idx + 1 == len(cil_tasks):
             for cls, acc in class_acc.items():
@@ -287,8 +292,27 @@ def main():
         'final_class_acc': class_acc
     }
     
+    # Generate all plots and reports
+    print("\n" + "="*50)
+    print("GENERATING PLOTS AND REPORTS")
+    print("="*50)
     
-    # Call plotting function 
+    # Plot backbone training
+    plotter.plot_backbone_training()
+    
+    # Plot CIL progression
+    plotter.plot_cil_progression()
+    
+    # Plot final class comparison
+    plotter.plot_final_comparison()
+    
+    # Save metrics to JSON
+    plotter.save_metrics()
+    
+    # Create summary report
+    plotter.create_summary_report()
+    
+    # Call original plotting function as well
     make_CIL_plots(cfg, backbone_class_acc, accuracy_history)
     
 

@@ -1,8 +1,9 @@
+# cnn_CIL_training_utils.py
+
 from sklearn.model_selection import GroupShuffleSplit
 import numpy as np
 import torch
 from utils import normalize_features, kd_loss_ce, make_global_to_local_map
-import random
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd

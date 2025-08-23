@@ -1,4 +1,4 @@
-# prepare_dogmove_data.py (paper-aligned cleaner for CNN pipeline)
+# clean_dog_data.py
 
 import os
 import sys

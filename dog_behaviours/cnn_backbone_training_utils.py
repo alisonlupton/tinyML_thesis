@@ -1,3 +1,4 @@
+# cnn_backbone_training_utils.py
 import torch 
 import numpy as np 
 from dataclasses import dataclass
@@ -79,7 +80,7 @@ def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_be
     return BackboneData(X_train, y_train, X_val, y_val, train_mean, train_std)
 
 
-def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg):
+def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg, plotter=None):
     print("Training backbone model...")
     best_val_acc = 0.0
     patience = 5
@@ -130,6 +131,10 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
         train_acc = 100 * train_correct / train_total
         val_acc = 100 * val_correct / val_total
         
+        # Track metrics with plotter if provided
+        if plotter is not None:
+            plotter.add_backbone_epoch(epoch, train_loss/len(backbone_train_loader), 
+                                     val_loss/len(backbone_val_loader), train_acc, val_acc)
         
         # Track best validation accuracy
         if val_acc > best_val_acc:

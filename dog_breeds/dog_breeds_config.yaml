@@ -15,38 +15,11 @@ num_pretrain_dogs: 10
 num_cil_dogs_per_task: 1 # can add more to make harder
 num_tasks: 3 # can add more to make harder
 
-# Backbone training
-backbone_learning_rate: 0.0003 # was 0.0005, can try 0.0001
-backbone_epochs: 100
-backbone_batch_size_train: 64
-backbone_batch_size_val: 64
-backbone_img_size: 224
-epochs_head_warmup: 3
-epochs_finetune: 30
-backbone_patience: 7
-lr_head: 0.001
-lr_finetune: 0.0003
-backbone_weight_decay: 0.0001
-backbone_label_smoothing: 0.05
-
-# Distillation part 1
-cache_dir: "../data/dog_breed_data/offline/" # where train_cache.pt / val_cache.pt live
-out_dir: "../data/dog_breed_data/distillation_1/"
-feat_dim_student: 128 # needs to match CIL feat_dim
-distillation_batch_size_train: 256
-distillation_batch_size_val: 256
-distillation_epochs: 50
-distillation_patience: 8
-distillation_lr: 0.0005
-distillation_weight_decay: 0.0001
-distillation_label_smoothing: 0.05
-distillation_alpha_kd: 1.0 # KL distillation weight (teacher logits)
-distillation_kd_T: 2.0 # temperature
-distillation_alpha_ce: 0.0 # currently turned off
-distillation_alpha_feat: 0.0 # currently off, set >0.0 to also match penultimate features (MSE)
-distillation_dropout: 0.3
+# Distillation done offline 
 
 # CIL training
+student_path: "../data/dog_breed_data/distillation_2/tuned_mcu_student.pth"
+student_meta_path : "../data/dog_breed_data/distillation_2/tuned_mcu_student_meta.json"
 buffer_size: 3000
 sparsity_ratio: 0.3
 CIL_batch_size_train: 1

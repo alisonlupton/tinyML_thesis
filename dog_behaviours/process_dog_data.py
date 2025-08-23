@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""
-Dog data processing with intelligent sampling.
-Separate from the CL pipeline for modularity.
-"""
+# process_dog_data.py
 
 import pandas as pd
 import numpy as np

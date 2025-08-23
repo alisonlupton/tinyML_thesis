@@ -1,33 +1,33 @@
-backbone_params: 591840
-head_params: 715
-total_params: 592555
+backbone_params: 346592
+head_params: 1419
+total_params: 348011
 head_nonzero_frac: 0.7002840638160706
-deployed_backbone_MB: 2.2576904296875
-deployed_head_dense_MB: 0.002727508544921875
-deployed_head_sparse_MB: 0.0019226073491154239
-deployed_total_dense_MB: 2.260417938232422
-deployed_total_sparse_MB: 2.2596130370366154
-head_weights_MB: 0.002727508544921875
-head_grads_MB: 0.002727508544921875
-head_opt_MB: 0.00545501708984375
-cwi_buffers_MB: 0.008056640625
-mask_MB: 0.002685546875
+deployed_backbone_MB: 1.3221435546875
+deployed_head_dense_MB: 0.005413055419921875
+deployed_head_sparse_MB: 0.0038032530283089727
+deployed_total_dense_MB: 1.3275566101074219
+deployed_total_sparse_MB: 1.325946807715809
+head_weights_MB: 0.005413055419921875
+head_grads_MB: 0.005413055419921875
+head_opt_MB: 0.01082611083984375
+cwi_buffers_MB: 0.01611328125
+mask_MB: 0.00537109375
 teacher_snapshot_MB: 0.0
-replay_total_MB: 0.2002716064453125
-replay_per_sample_B: 70
-activations_train_MB: 0.000244140625
-activations_infer_MB: 18.0
-macs_backbone_per_sample_M: 21435.383808
-macs_proj_per_sample_M: 0.008192
-macs_head_per_sample_dense_M: 0.000704
-macs_head_per_sample_sparse_M: 0.000492
-macs_total_fwd_sparse_per_sample_M: 21435.392492
-macs_train_per_batch_sparse_M: 21435.39446
-final_feat_hw: (192, 192)
-proj_in_channels: 128
-feat_dim: 64
+replay_total_MB: 0.3833770751953125
+replay_per_sample_B: 134
+activations_train_MB: 0.00048828125
+activations_infer_MB: 5.625
+macs_backbone_per_sample_M: 2990.112768
+macs_proj_per_sample_M: 0.02048
+macs_head_per_sample_dense_M: 0.001408
+macs_head_per_sample_sparse_M: 0.000985
+macs_total_fwd_sparse_per_sample_M: 2990.134233
+macs_train_per_batch_sparse_M: 2990.138173
+final_feat_hw: (96, 96)
+proj_in_channels: 160
+feat_dim: 128
 head_out_dim: 11
-deployed_total_sparse_pretty: 2.26 MB
-replay_total_pretty: 205.08 KB
-activations_train_pretty: 256.00 B
-activations_infer_pretty: 18.00 MB
+deployed_total_sparse_pretty: 1.33 MB
+replay_total_pretty: 392.58 KB
+activations_train_pretty: 512.00 B
+activations_infer_pretty: 5.62 MB

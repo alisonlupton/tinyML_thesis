@@ -9,9 +9,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from process_dog_data import process_dog_data
 from utils import load_config, set_seed , ClassRegistry
 from metrics import profile_cil_resources_2d
-from models.cnn import SimplifiedTDMModelCNN
-from cnn_backbone_training_utils import train_cnn_backbone, load_data_cnn_backbone, eval_new_classes_on_backbone
-import logging
+from models.cnn import TunedMCUCILCNN_M3
+from cnn_backbone_training_utils import load_data_cnn_backbone, eval_new_classes_on_backbone
 from cnn_CIL_training_utils import seen_and_new, load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots
 from replay import BalancedQuantReplayDynamic
 import json
@@ -43,6 +42,9 @@ def main():
     backbone_gids, schedule = process_dog_data(cfg) # these are lists of gids
     index_json = cfg['cleaned_data_path_json']
     index_csv = cfg['cleaned_data_path_csv']
+    
+    student_path = cfg['student_path']
+    student_meta_path = cfg['student_meta_path']
     gid2breed  = json.loads(Path(index_json).read_text())
     full_df = pd.read_csv(index_csv)
         
@@ -56,36 +58,45 @@ def main():
     
     
     #####################################################################################################################
-    #--------------------------------------- STEP 1: BACKBONE SETTUP 
+    #--------------------------------------- STEP 1: LOAD TRAINED STUDENT MODEL
     #####################################################################################################################
     
     print(f"\n{'='*50}")
-    print("STEP 1: BACKBONE TRAINING")
+    print("STEP 1: LOADING TRAINED STUDENT MODEL")
     print(f"{'='*50}")
     
-    # Create backbone model
+    # Load trained student model (tuned MCU version)
+    
+    
+    print(f"Loading tuned MCU student model from: {student_path}")
+    print(f"Loading student metadata from: {student_meta_path}")
+    
+    # Load student metadata
+    with open(student_meta_path, 'r') as f:
+        student_meta = json.load(f)
+    
+    # Create backbone model with tuned MCU architecture
     backbone_num_classes = len(backbone_gids)
-
-    backbone_model = SimplifiedTDMModelCNN(3, backbone_num_classes, device, cfg['sparsity_ratio'], cfg['feat_dim'])
+    backbone_model = TunedMCUCILCNN_M3(3, backbone_num_classes, device, cfg['sparsity_ratio'], student_meta['feature_dim'])
     backbone_model.to(device)
-
+    
+    # Load trained student weights
+    student_state_dict = torch.load(student_path, map_location=device)
+    
+    # The tuned student has backbone, proj, classifier structure
+    backbone_model.backbone.load_state_dict(student_state_dict['backbone'])
+    backbone_model.proj.load_state_dict(student_state_dict['proj'])
+    
+    print(f"Successfully loaded student model!")
+    print(f"Student was trained on {len(student_meta['backbone_gids'])} classes")
+    print(f"Student backbone_gids: {student_meta['backbone_gids']}")
+    print(f"Current backbone_gids: {backbone_gids}")
+    
+    # Load data for evaluation (we still need this for transforms and evaluation)
     backbone_data = load_data_cnn_backbone(cfg, backbone_gids, full_df)
     
-    # Create backbone data loaders
-    backbone_train_loader = DataLoader(TensorDataset(backbone_data.X_train, backbone_data.y_train), batch_size=cfg['backbone_batch_size_train'], shuffle=True)
-    backbone_val_loader = DataLoader(TensorDataset(backbone_data.X_val, backbone_data.y_val), batch_size=cfg['backbone_batch_size_val'], shuffle=False)
-    
-    backbone_optimizer = torch.optim.Adam(backbone_model.parameters(), lr=cfg['backbone_learning_rate'], weight_decay = cfg['backbone_weight_decay'])
-    backbone_criterion = nn.CrossEntropyLoss() 
-    
     #####################################################################################################################
-    #--------------------------------------- STEP 2: BACKBONE TRAINING AND EVALUATION
-    #####################################################################################################################
-    
-    backbone_model, _ = train_cnn_backbone(backbone_model, backbone_data, backbone_optimizer, backbone_criterion, backbone_train_loader, backbone_val_loader, device, cfg, gid2breed)
-    
-    #####################################################################################################################
-    #--------------------------------------- STEP 3: SET UP CIL MODEL
+    #--------------------------------------- STEP 2: SET UP CIL MODEL
     #####################################################################################################################
     print(f"\n{'='*50}")
     print("STEP 2: CIL TRAINING")
@@ -98,7 +109,7 @@ def main():
         p.requires_grad = False
     
     # Create CIL model
-    cil_model = SimplifiedTDMModelCNN(3, backbone_num_classes, device, cfg['sparsity_ratio'], cfg['feat_dim']).to(device)
+    cil_model = TunedMCUCILCNN_M3(3, backbone_num_classes, device, cfg['sparsity_ratio'], student_meta['feature_dim']).to(device)
     cil_model.backbone.load_state_dict(backbone_model.backbone.state_dict())
     cil_model.proj.load_state_dict(backbone_model.proj.state_dict())   # have to load proj also
 
@@ -115,7 +126,7 @@ def main():
             m.eval()
     
     #####################################################################################################################        
-    #--------------------------------------- STEP 4: SET UP CIL SCENARIO
+    #--------------------------------------- STEP 3: SET UP CIL SCENARIO
     ##################################################################################################################### 
         
     # Create evaluation classifier for all 7 classes
@@ -138,7 +149,7 @@ def main():
     delta_k = cfg['delta_k']    
     
     #####################################################################################################################
-    #--------------------------------------- STEP 5: PERFORM CIL SCENARIO
+    #--------------------------------------- STEP 4: PERFORM CIL SCENARIO
     #####################################################################################################################
     
     #---------------------------- CIL PRE TASK PIPELINE (TASK NUMBER LEVEL)
