@@ -245,10 +245,15 @@ def process_dog_data(cfg):
     
     # Save each dog's data separately
     for dog_id, data in processed_data.items():
-        dog_file = output_dir / f"dog_{dog_id}_intelligent.npz"
+        dog_file = output_dir / f"dog_{dog_id}_intelligent_new.npz"
         # save *.npz — replace old keys
+        
+         # extract unique session IDs for this dog
+        unique_sessions = np.unique(data['session_ids'][:, 1])  # column 1 = TestNum
+        # print(f"Dog {dog_id} has sessions: {unique_sessions.tolist()}")
+
         np.savez_compressed(
-            output_dir / f"dog_{dog_id}_intelligent.npz",
+            output_dir / f"dog_{dog_id}_intelligent_new.npz",
             X=processed_data[dog_id]['X'],
             y=processed_data[dog_id]['y'],
             segment_ids=processed_data[dog_id]['segment_ids'],
@@ -257,7 +262,9 @@ def process_dog_data(cfg):
             sensor_cols=processed_data[dog_id]['sensor_cols'],
             window_len=processed_data[dog_id]['window_len'],
             stride=processed_data[dog_id]['stride'],
-            sample_rate=processed_data[dog_id]['sample_rate']
+            sample_rate=processed_data[dog_id]['sample_rate'],
+            sessions=unique_sessions
+            
         )
         print(f"Saved Dog {dog_id} data to {dog_file}")
         

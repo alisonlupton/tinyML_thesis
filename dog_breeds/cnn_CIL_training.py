@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from process_dog_data import process_dog_data
 from utils import load_config, set_seed , ClassRegistry
-from metrics import profile_cil_resources_2d
+from metrics import profile_tinyml_cil, pretty_print_tinyml_report
 from models.cnn import TunedMCUCILCNN_M3
 from cnn_backbone_training_utils import load_data_cnn_backbone, eval_new_classes_on_backbone
 from cnn_CIL_training_utils import seen_and_new, load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots
@@ -152,6 +152,9 @@ def main():
     #--------------------------------------- STEP 4: PERFORM CIL SCENARIO
     #####################################################################################################################
     
+    
+    # metrics !
+
     #---------------------------- CIL PRE TASK PIPELINE (TASK NUMBER LEVEL)
     for task_idx, _task_gids in enumerate(schedule):        
         
@@ -196,7 +199,20 @@ def main():
         
         if task_idx == 0:
             # # Measure Sizing! 
-            prof = profile_cil_resources_2d(cfg, cil_model)
+                
+            report = profile_tinyml_cil(
+                model=cil_model,
+                input_size=(1,3,160,160),
+                activation_bits_infer=32,   # inference path is still FP32
+                activation_bits_train=32,   # head training in FP32
+                weight_bits_deployed=32,    # model params are stored in FP32 right now
+                batch_size_train=cfg['CIL_batch_size_train'],
+                replay_size=cfg['buffer_size'],
+                replay_bits=8,             # caching latents size
+                optimizer="adam"
+            )
+            
+            pretty_print_tinyml_report(report)
                
         # 3) Inter-task expansion (warm up grow before epochs)
         if task_idx > 0:

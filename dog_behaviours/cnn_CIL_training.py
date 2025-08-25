@@ -2,6 +2,7 @@
 
 
 import torch
+torch.use_deterministic_algorithms(True)  # PyTorch ≥1.8
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from utils import load_config, load_processed_dog_data, evaluate_all_classes, set_seed, make_global_to_local_map, ClassRegistry
@@ -10,9 +11,10 @@ from metrics import profile_cil_resources
 from models.cnn import SimplifiedTDMModelCNN
 from cnn_backbone_training_utils import train_cnn_backbone, load_data_cnn_backbone
 import logging
-from cnn_CIL_training_utils import load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots
+from cnn_CIL_training_utils import load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots, check_CIL_validity
 from replay import BalancedQuantReplayDynamic
 from report_plotting import CILTrainingPlotter
+import random
 
 def main():
     """Main function"""
@@ -22,10 +24,12 @@ def main():
     cfg = load_config()
     seed = cfg['random_seed']
     set_seed(seed)
+    gen_seed = torch.Generator()
+    gen_seed.manual_seed(seed)
     
     # Load intelligent sampling data
     dog_data, behavior_to_idx, behaviors = load_processed_dog_data()
-    
+
     if len(dog_data) == 0:
         print("No dog data loaded!")
         return
@@ -34,7 +38,7 @@ def main():
     backbone_behaviors = cfg['backbone_behaviors']
     cil_behaviors = cfg['cil_behaviors']
     all_behaviors = backbone_behaviors + cil_behaviors
-    
+
     # CIL task progression
     cil_tasks = cfg['cil_tasks']
     
@@ -50,6 +54,7 @@ def main():
     print(f"\n{'='*50}")
     print("STEP 1: BACKBONE TRAINING")
     print(f"{'='*50}")
+ 
     
     # Create backbone model
     backbone_num_classes = len(backbone_behaviors)
@@ -58,17 +63,34 @@ def main():
     backbone_model = SimplifiedTDMModelCNN(C, backbone_num_classes, device, sparsity_ratio=0.3)
     backbone_model.to(device)
     
-    
     # Prepare backbone training data 
-    target_dog = cfg['target_dog']  # Target dog for personalization
-    validation_dog = cfg['backbone_val_dog']  # Separate validation dog (different from target and training)
+    # Exclude target dog and validation dog from backbone training
+    all_possible_dogs = sorted(dog_data.keys())
+    valid_CIL_dogs_for_this_seed = [
+        d for d in all_possible_dogs
+        if check_CIL_validity(dog_data, d, all_behaviors, behavior_to_idx, verbose=True)
+    ] 
+    
+    print(f"Valid CIL dogs for seed {seed}: {valid_CIL_dogs_for_this_seed}")
+    if not valid_CIL_dogs_for_this_seed:
+        raise ValueError("No dogs satisfy nonzero train+test counts for all 7 classes under this seed/split.")
+    
+    rng = random.Random(seed)  
+    
+    # pick CIL target dog
+    target_dog = rng.choice(valid_CIL_dogs_for_this_seed)
+    print(f"Target Dog Chosen: {target_dog}")
+    
+    # pick validation dog (not same as target)
+    remaining = sorted([d for d in all_possible_dogs if d != target_dog])
+    validation_dog = rng.choice(remaining)
+    print(f"Validation Dog Chosen: {validation_dog}")
     
     # Exclude target dog and validation dog from backbone training
-    all_dogs = list(dog_data.keys())
-    available_dogs = [dog for dog in all_dogs if dog not in [target_dog, validation_dog]]
-    num_backbone_dogs = cfg['num_pretrain_dogs']
-    backbone_dogs = available_dogs[:num_backbone_dogs]  # Use first num available dogs
-    
+    remaining = sorted([dog for dog in all_possible_dogs if dog not in [target_dog, validation_dog]])
+    backbone_dogs = rng.sample(remaining, cfg['num_pretrain_dogs']) # randomly selection num of pretraining dogs
+    print(f"Backbone Dogs Chosen: {backbone_dogs}")
+
     logging.info(f"Backbone training dogs: {backbone_dogs}")
     logging.info(f"Backbone validation dog: {validation_dog}")
     logging.info(f"Target dog for CIL: {target_dog}")
@@ -77,12 +99,12 @@ def main():
     
     # Create data loaders
     backbone_train_loader = DataLoader(TensorDataset(backbone_data.X_train, backbone_data.y_train), 
-                                      batch_size=cfg['backbone_batch_size_train'], shuffle=True)
+                                      batch_size=cfg['backbone_batch_size_train'], shuffle=True, generator = gen_seed)
     backbone_val_loader = DataLoader(TensorDataset(backbone_data.X_val, backbone_data.y_val), 
                                     batch_size=cfg['backbone_batch_size_val'], shuffle=False)
     
     backbone_optimizer = torch.optim.Adam(backbone_model.parameters(), lr=cfg['backbone_learning_rate'], weight_decay = cfg['backbone_weight_decay'])
-    backbone_criterion = nn.CrossEntropyLoss()
+    backbone_criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
     
     # Initialize plotter for tracking metrics
     plotter = CILTrainingPlotter()
@@ -96,7 +118,11 @@ def main():
     #####################################################################################################################
     #--------------------------------------- STEP 3: SET UP CIL MODEL
     #####################################################################################################################
-
+    
+    print(f"\n{'='*50}")
+    print("STEP 2: CIL TRAINING")
+    print(f"{'='*50}")
+ 
     # Freeze backbone
     for param in backbone_model.backbone.parameters():
         param.requires_grad = False
@@ -118,7 +144,7 @@ def main():
         print(f"Target dog {target_dog} not found!")
         return
     
-    X_train, y_train, X_test, y_test = load_CIL_data(dog_data, target_dog, all_behaviors, behavior_to_idx, backbone_data.train_mean, backbone_data.train_std)
+    X_train, y_train, X_test, y_test = load_CIL_data(dog_data, target_dog, all_behaviors, behavior_to_idx, backbone_data.train_mean, backbone_data.train_std, seed, verbose = True)
     
     # Create evaluation classifier for all 7 classes
     backbone_registry = ClassRegistry(all_behaviors)
@@ -220,7 +246,7 @@ def main():
         
         # 4) Create teacher snapshot over the previous classes for DDR/KD
         train_loader = DataLoader(TensorDataset(X_task, y_task_remapped), 
-                                batch_size=cfg['CIL_batch_size_train'], shuffle=True)
+                                batch_size=cfg['CIL_batch_size_train'], shuffle=True, generator = gen_seed)
         
         teacher = None  
         if prev_num > 0:  
@@ -255,8 +281,13 @@ def main():
             if task_idx > 0 and epoch == delta_k:
                 cil_model.head.shrink_after_warmup(p=p_inter)
                 
-            train_with_simplified_tdm(cil_model, cfg, registry, task_classes, teacher, prev_num, train_loader, behavior_to_idx, optimizer, criterion, device, 
+            # Train and get metrics
+            train_loss, train_acc = train_with_simplified_tdm(cil_model, cfg, registry, task_classes, teacher, prev_num, train_loader, behavior_to_idx, optimizer, criterion, device, 
                                     replay_buffer_q, seen_gids.tolist(), seen_names, task_idx, epoch)
+            
+            # Add training metrics to plotter
+            task_name = cil_tasks[task_idx] if task_idx < len(cil_tasks) else f"Task_{task_idx+1}"
+            plotter.add_cil_task_training_epoch(task_name, epoch, train_loss, train_acc)
 
         #---------------------------- CIL POST TASK PIPELINE (TASK NUMBER LEVEL)
         # Evaluate on all *seen* classes (no future classes!)
@@ -301,13 +332,19 @@ def main():
     plotter.plot_backbone_training()
     
     # Plot CIL progression
-    plotter.plot_cil_progression()
+    # plotter.plot_cil_progression()
+    
+    # Plot CIL training curves (new)
+    # plotter.plot_cil_training_curves()
+    
+    # Plot CIL training summary (new)
+    plotter.plot_cil_training_summary()
     
     # Plot final class comparison
-    plotter.plot_final_comparison()
+    # plotter.plot_final_comparison()
     
     # Save metrics to JSON
-    plotter.save_metrics()
+    # plotter.save_metrics()
     
     # Create summary report
     plotter.create_summary_report()

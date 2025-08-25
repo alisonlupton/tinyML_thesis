@@ -41,7 +41,7 @@ def load_processed_dog_data():
     dog_data = {}
     total_samples = 0
     
-    for dog_file in sorted(processed_dir.glob("dog_*_intelligent.npz")):
+    for dog_file in sorted(processed_dir.glob("dog_*_intelligent_new.npz")):
         dog_id = int(dog_file.stem.split('_')[1])  # Extract dog ID from filename
         
         # Load numpy data
@@ -61,6 +61,11 @@ def load_processed_dog_data():
         sess_ids = data.get('session_ids', None)
         window_len = int(data.get('window_len', 0))
         stride = int(data.get('stride', 0))
+        sessions = data['sessions']
+        
+        check = False
+        if len(sessions) == 2:
+            check = True
         
         # Convert to tensors (raw data - no normalization yet)
         dog_data[dog_id] = {
@@ -71,7 +76,8 @@ def load_processed_dog_data():
             'behaviors': list(data['behaviors']),
             'sensor_cols': sensor_cols,
             'window_len': L,
-        }
+            'multiple_sessions': check
+            }
         
 
         total_samples += len(X)

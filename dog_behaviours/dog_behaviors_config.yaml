@@ -9,27 +9,13 @@ min_segment_length: 100
 # Windowing
 sample_rate_hz: 100 # every 1 second
 window_seconds: 1
-stride_seconds: 1
+stride_seconds: .5
 flatten_windows: False
-
-# Continual learning personalization
 
 # Sensors to use
 use_acc: true
 use_gyro: true
 sensor_locations: ["Back", "Neck"]
-
-# Behavior classes to include
-behaviors:
-  [
-    "Galloping",
-    "Lying on chest",
-    "Sitting",
-    "Sniffing",
-    "Standing",
-    "Trotting",
-    "Walking",
-  ]
 
 # General Training
 random_seed: 42

@@ -90,6 +90,16 @@ class CILTrainingPlotter:
             'overall_accuracies': [],  # List of overall accuracies per task
             'task_names': []  # List of task names
         }
+        
+        # New storage for CIL training metrics
+        self.cil_training_metrics = {
+            'task_training_losses': [],  # List of lists: [[epoch1_loss, epoch2_loss, ...], ...]
+            'task_training_accuracies': [],  # List of lists: [[epoch1_acc, epoch2_acc, ...], ...]
+            'task_validation_losses': [],  # List of lists: [[epoch1_val_loss, epoch2_val_loss, ...], ...]
+            'task_validation_accuracies': [],  # List of lists: [[epoch1_val_acc, epoch2_val_acc, ...], ...]
+            'task_epochs': [],  # List of lists: [[1, 2, 3, ...], ...] for each task
+            'task_names': []  # List of task names
+        }
     
     def add_backbone_epoch(self, epoch: int, train_loss: float, val_loss: float, 
                           train_acc: float, val_acc: float):
@@ -107,6 +117,30 @@ class CILTrainingPlotter:
         self.cil_metrics['task_accuracies'].append(class_accuracies.copy())
         self.cil_metrics['overall_accuracies'].append(overall_accuracy)
     
+    def add_cil_task_training_epoch(self, task_name: str, epoch: int, train_loss: float, 
+                                   train_acc: float, val_loss: float = None, val_acc: float = None):
+        """Add CIL training metrics for one epoch of a specific task"""
+        # Find or create task index
+        if task_name not in self.cil_training_metrics['task_names']:
+            self.cil_training_metrics['task_names'].append(task_name)
+            self.cil_training_metrics['task_training_losses'].append([])
+            self.cil_training_metrics['task_training_accuracies'].append([])
+            self.cil_training_metrics['task_validation_losses'].append([])
+            self.cil_training_metrics['task_validation_accuracies'].append([])
+            self.cil_training_metrics['task_epochs'].append([])
+        
+        task_idx = self.cil_training_metrics['task_names'].index(task_name)
+        
+        # Add metrics
+        self.cil_training_metrics['task_epochs'][task_idx].append(epoch)
+        self.cil_training_metrics['task_training_losses'][task_idx].append(train_loss)
+        self.cil_training_metrics['task_training_accuracies'][task_idx].append(train_acc)
+        
+        if val_loss is not None:
+            self.cil_training_metrics['task_validation_losses'][task_idx].append(val_loss)
+        if val_acc is not None:
+            self.cil_training_metrics['task_validation_accuracies'][task_idx].append(val_acc)
+
     def plot_backbone_training(self, save_plot=True):
         """Plot backbone training curves"""
         if not self.backbone_metrics['epochs']:
@@ -141,9 +175,9 @@ class CILTrainingPlotter:
             plt.savefig(f'{self.save_dir}/backbone_training.png', dpi=300, bbox_inches='tight')
             print(f"Backbone training plot saved to {self.save_dir}/backbone_training.png")
         
-        plt.show()
+        # plt.show()
     
-    def plot_cil_progression(self, save_plot=True):
+    def plot_cil_progression(self, save_plot=False):
         """Plot CIL task progression"""
         if not self.cil_metrics['task_names']:
             print("No CIL metrics to plot!")
@@ -212,9 +246,9 @@ class CILTrainingPlotter:
             plt.savefig(f'{self.save_dir}/cil_progression.png', dpi=300, bbox_inches='tight')
             print(f"CIL progression plot saved to {self.save_dir}/cil_progression.png")
         
-        plt.show()
+        # plt.show()
     
-    def plot_final_comparison(self, save_plot=True):
+    def plot_final_comparison(self, save_plot=False):
         """Plot final comparison of all classes"""
         if not self.cil_metrics['task_accuracies']:
             print("No CIL metrics to plot!")
@@ -252,7 +286,140 @@ class CILTrainingPlotter:
             plt.savefig(f'{self.save_dir}/final_class_performance.png', dpi=300, bbox_inches='tight')
             print(f"Final class performance plot saved to {self.save_dir}/final_class_performance.png")
         
-        plt.show()
+        # plt.show()
+    
+    def plot_cil_training_curves(self, save_plot=True):
+        """Plot CIL training curves (loss and accuracy) for all tasks"""
+        if not self.cil_training_metrics['task_names']:
+            print("No CIL training metrics to plot!")
+            return
+        
+        num_tasks = len(self.cil_training_metrics['task_names'])
+        fig, axes = plt.subplots(2, num_tasks, figsize=(5*num_tasks, 10))
+        
+        # If only one task, make axes 2D
+        if num_tasks == 1:
+            axes = axes.reshape(2, 1)
+        
+        colors = sns.color_palette("deep", num_tasks)
+        
+        for task_idx, task_name in enumerate(self.cil_training_metrics['task_names']):
+            epochs = self.cil_training_metrics['task_epochs'][task_idx]
+            train_losses = self.cil_training_metrics['task_training_losses'][task_idx]
+            train_accs = self.cil_training_metrics['task_training_accuracies'][task_idx]
+            val_losses = self.cil_training_metrics['task_validation_losses'][task_idx]
+            val_accs = self.cil_training_metrics['task_validation_accuracies'][task_idx]
+            
+            # Plot training loss
+            ax_loss = axes[0, task_idx]
+            ax_loss.plot(epochs, train_losses, 'b-', label='Training Loss', linewidth=2, color=colors[task_idx])
+            if val_losses:
+                ax_loss.plot(epochs, val_losses, 'r--', label='Validation Loss', linewidth=2, color=colors[task_idx], alpha=0.7)
+            ax_loss.set_xlabel('Epoch', fontsize=10)
+            ax_loss.set_ylabel('Loss', fontsize=10)
+            ax_loss.set_title(f'{task_name} - Loss', fontsize=12, fontweight='bold')
+            ax_loss.legend()
+            ax_loss.grid(True, alpha=0.3)
+            
+            # Plot training accuracy
+            ax_acc = axes[1, task_idx]
+            ax_acc.plot(epochs, train_accs, 'b-', label='Training Accuracy', linewidth=2, color=colors[task_idx])
+            if val_accs:
+                ax_acc.plot(epochs, val_accs, 'r--', label='Validation Accuracy', linewidth=2, color=colors[task_idx], alpha=0.7)
+            ax_acc.set_xlabel('Epoch', fontsize=10)
+            ax_acc.set_ylabel('Accuracy (%)', fontsize=10)
+            ax_acc.set_title(f'{task_name} - Accuracy', fontsize=12, fontweight='bold')
+            ax_acc.legend()
+            ax_acc.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_plot:
+            plt.savefig(f'{self.save_dir}/cil_training_curves.png', dpi=300, bbox_inches='tight')
+            print(f"CIL training curves plot saved to {self.save_dir}/cil_training_curves.png")
+        
+        # plt.show()
+    
+    def plot_cil_training_summary(self, save_plot=True):
+        """Plot a summary of CIL training metrics across all tasks"""
+        if not self.cil_training_metrics['task_names']:
+            print("No CIL training metrics to plot!")
+            return
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        
+        # # Plot 1: Final training loss per task
+        # final_train_losses = []
+        # task_labels = []
+        # for task_idx, task_name in enumerate(self.cil_training_metrics['task_names']):
+        #     if self.cil_training_metrics['task_training_losses'][task_idx]:
+        #         final_train_losses.append(self.cil_training_metrics['task_training_losses'][task_idx][-1])
+        #         task_labels.append(f'Task {task_idx+1}')
+        
+        # bars1 = ax1.bar(task_labels, final_train_losses, color=sns.color_palette("deep", len(task_labels)), alpha=0.8)
+        # ax1.set_title('Final Training Loss per Task', fontsize=14, fontweight='bold')
+        # ax1.set_ylabel('Loss', fontsize=12)
+        # ax1.grid(True, alpha=0.3, axis='y')
+        
+        # # Add value labels on bars
+        # for bar, loss in zip(bars1, final_train_losses):
+        #     height = bar.get_height()
+        #     ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+        #             f'{loss:.3f}', ha='center', va='bottom', fontweight='bold')
+        
+        # # Plot 2: Final training accuracy per task
+        # final_train_accs = []
+        # for task_idx in range(len(self.cil_training_metrics['task_names'])):
+        #     if self.cil_training_metrics['task_training_accuracies'][task_idx]:
+        #         final_train_accs.append(self.cil_training_metrics['task_training_accuracies'][task_idx][-1])
+        
+        # bars2 = ax2.bar(task_labels, final_train_accs, color=sns.color_palette("deep", len(task_labels)), alpha=0.8)
+        # ax2.set_title('Final Training Accuracy per Task', fontsize=14, fontweight='bold')
+        # ax2.set_ylabel('Accuracy (%)', fontsize=12)
+        # ax2.grid(True, alpha=0.3, axis='y')
+        
+        # # Add value labels on bars
+        # for bar, acc in zip(bars2, final_train_accs):
+        #     height = bar.get_height()
+        #     ax2.text(bar.get_x() + bar.get_width()/2., height + 1,
+        #             f'{acc:.1f}%', ha='center', va='bottom', fontweight='bold')
+        
+        # Plot 3: Training loss progression (all tasks on same plot)
+        ax1.set_title('Training Loss Progression', fontsize=14, fontweight='bold')
+        ax1.set_xlabel('Epoch', fontsize=12)
+        ax1.set_ylabel('Loss', fontsize=12)
+        ax1.grid(True, alpha=0.3)
+        
+        colors = sns.color_palette("deep", len(self.cil_training_metrics['task_names']))
+        for task_idx, task_name in enumerate(self.cil_training_metrics['task_names']):
+            epochs = self.cil_training_metrics['task_epochs'][task_idx]
+            losses = self.cil_training_metrics['task_training_losses'][task_idx]
+            if epochs and losses:
+                ax1.plot(epochs, losses, 'o-', label=f'Task {task_idx+1}', 
+                        linewidth=2, markersize=4, color=colors[task_idx])
+        ax1.legend()
+        
+        # Plot 4: Training accuracy progression (all tasks on same plot)
+        ax2.set_title('Training Accuracy Progression', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Epoch', fontsize=12)
+        ax2.set_ylabel('Accuracy (%)', fontsize=12)
+        ax2.grid(True, alpha=0.3)
+        
+        for task_idx, task_name in enumerate(self.cil_training_metrics['task_names']):
+            epochs = self.cil_training_metrics['task_epochs'][task_idx]
+            accs = self.cil_training_metrics['task_training_accuracies'][task_idx]
+            if epochs and accs:
+                ax2.plot(epochs, accs, 'o-', label=f'Task {task_idx+1}', 
+                        linewidth=2, markersize=4, color=colors[task_idx])
+        ax2.legend()
+        
+        plt.tight_layout()
+        
+        if save_plot:
+            plt.savefig(f'{self.save_dir}/cil_training_summary.png', dpi=300, bbox_inches='tight')
+            print(f"CIL training summary plot saved to {self.save_dir}/cil_training_summary.png")
+        
+        # plt.show()
     
     def save_metrics(self, filename='cil_training_metrics.json'):
         """Save all metrics to JSON file"""
@@ -265,6 +432,14 @@ class CILTrainingPlotter:
                 'task_names': self.cil_metrics['task_names'],
                 'overall_accuracies': self.cil_metrics['overall_accuracies'],
                 'task_accuracies': self.cil_metrics['task_accuracies']
+            },
+            'cil_training_metrics': {
+                'task_names': self.cil_training_metrics['task_names'],
+                'task_training_losses': self.cil_training_metrics['task_training_losses'],
+                'task_training_accuracies': self.cil_training_metrics['task_training_accuracies'],
+                'task_validation_losses': self.cil_training_metrics['task_validation_losses'],
+                'task_validation_accuracies': self.cil_training_metrics['task_validation_accuracies'],
+                'task_epochs': self.cil_training_metrics['task_epochs']
             }
         }
         
@@ -299,6 +474,26 @@ class CILTrainingPlotter:
         for i, (task_name, overall_acc) in enumerate(zip(self.cil_metrics['task_names'], 
                                                         self.cil_metrics['overall_accuracies'])):
             print(f"  Task {i+1} ({task_name}): {overall_acc:.2f}%")
+        
+        # CIL Training Metrics Summary
+        if self.cil_training_metrics['task_names']:
+            print(f"\nCIL TRAINING METRICS:")
+            for task_idx, task_name in enumerate(self.cil_training_metrics['task_names']):
+                if self.cil_training_metrics['task_training_losses'][task_idx]:
+                    final_train_loss = self.cil_training_metrics['task_training_losses'][task_idx][-1]
+                    final_train_acc = self.cil_training_metrics['task_training_accuracies'][task_idx][-1]
+                    num_epochs = len(self.cil_training_metrics['task_epochs'][task_idx])
+                    print(f"  Task {task_idx+1} ({task_name}):")
+                    print(f"    Epochs: {num_epochs}")
+                    print(f"    Final training loss: {final_train_loss:.4f}")
+                    print(f"    Final training accuracy: {final_train_acc:.2f}%")
+                    
+                    # Add validation metrics if available
+                    if self.cil_training_metrics['task_validation_losses'][task_idx]:
+                        final_val_loss = self.cil_training_metrics['task_validation_losses'][task_idx][-1]
+                        final_val_acc = self.cil_training_metrics['task_validation_accuracies'][task_idx][-1]
+                        print(f"    Final validation loss: {final_val_loss:.4f}")
+                        print(f"    Final validation accuracy: {final_val_acc:.2f}%")
         
         # Final per-class performance
         if self.cil_metrics['task_accuracies']:

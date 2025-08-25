@@ -1,257 +1,265 @@
 # metrics.py
-import math
-from dataclasses import dataclass, asdict
-from typing import Dict, Any, Tuple, List, Optional
 import torch
 import torch.nn as nn
+from collections import defaultdict
+from typing import Dict, Tuple, Optional
 
-# ---------- helpers ----------
-def _count_params(m: nn.Module) -> int:
-    return sum(p.numel() for p in m.parameters())
+# ---------- Core hook-based profiler over backbone + proj ----------
+class _FrozenFeatExtractor(nn.Module):
+    """Wraps a CIL model to expose backbone->gap->proj and return features only."""
+    def __init__(self, cil_model: nn.Module):
+        super().__init__()
+        self.backbone = cil_model.backbone
+        self.gap = cil_model.gap
+        self.proj = cil_model.proj
+    def forward(self, x):
+        x = self.backbone(x)
+        x = self.gap(x).flatten(1)
+        z = self.proj(x)    # (N, feat_dim)
+        return z
 
-def _nz_frac_from_head(head) -> float:
-    # prefer binary pruning mask if present
-    if hasattr(head, "mask") and head.mask is not None:
-        m = head.mask
-        return float((m != 0).float().mean().item())
-    W = head.linear.weight.data
-    return float((W.abs() > 0).float().mean().item())
-
-def _fmt_bytes(n: float) -> str:
-    u = ["B","KB","MB","GB","TB"]
-    i = 0
-    while n >= 1024 and i < len(u)-1:
-        n /= 1024.0; i += 1
-    return f"{n:.2f} {u[i]}"
-
-def _conv2d_out_hw(H: int, W: int, k: int, s: int, p: int, d: int) -> Tuple[int,int]:
-    Hout = math.floor((H + 2*p - d*(k-1) - 1)/s + 1)
-    Wout = math.floor((W + 2*p - d*(k-1) - 1)/s + 1)
-    return Hout, Wout
-
-def _scan_conv2d_specs(backbone: nn.Module):
-    """Return list of (Cin, Cout, k, s, p, d) in backbone order for Conv2d only."""
-    specs = []
-    for m in backbone.modules():
-        if isinstance(m, nn.Conv2d):
-            k = m.kernel_size if isinstance(m.kernel_size, int) else m.kernel_size[0]
-            s = m.stride if isinstance(m.stride, int) else m.stride[0]
-            p = m.padding if isinstance(m.padding, int) else m.padding[0]
-            d = m.dilation if isinstance(m.dilation, int) else m.dilation[0]
-            specs.append((m.in_channels, m.out_channels, int(k), int(s), int(p), int(d)))
-    return specs
-
-@dataclass
-class CILProfile2D:
-    # params
-    backbone_params: int
-    head_params: int
-    total_params: int
-    head_nonzero_frac: float
-
-    # deployment memory (int8 weights, unless cfg overrides)
-    deployed_backbone_MB: float
-    deployed_head_dense_MB: float
-    deployed_head_sparse_MB: float
-    deployed_total_dense_MB: float
-    deployed_total_sparse_MB: float
-
-    # training SRAM (head-only training, fp32 unless cfg overrides)
-    head_weights_MB: float
-    head_grads_MB: float
-    head_opt_MB: float
-    cwi_buffers_MB: float
-    mask_MB: float
-    teacher_snapshot_MB: float
-    replay_total_MB: float
-    replay_per_sample_B: int
-    activations_train_MB: float  # head-only training → features buffer
-
-    # inference SRAM (peak working set for B=1)
-    activations_infer_MB: float
-
-    # compute
-    macs_backbone_per_sample_M: float
-    macs_proj_per_sample_M: float
-    macs_head_per_sample_dense_M: float
-    macs_head_per_sample_sparse_M: float
-    macs_total_fwd_sparse_per_sample_M: float
-    macs_train_per_batch_sparse_M: float
-
-    # shapes
-    final_feat_hw: Tuple[int,int]
-    proj_in_channels: int
-    feat_dim: int
-    head_out_dim: int
-
-    def pretty(self) -> Dict[str, Any]:
-        d = asdict(self)
-        d.update({
-            "deployed_total_sparse_pretty": _fmt_bytes(self.deployed_total_sparse_MB * 1024**2),
-            "replay_total_pretty": _fmt_bytes(self.replay_total_MB * 1024**2),
-            "activations_train_pretty": _fmt_bytes(self.activations_train_MB * 1024**2),
-            "activations_infer_pretty": _fmt_bytes(self.activations_infer_MB * 1024**2),
-        })
-        return d
-
-def profile_cil_resources_2d(cfg: Dict[str, Any], model: nn.Module) -> CILProfile2D:
+@torch.no_grad()
+def _profile_forward(model: nn.Module,
+                     input_size: Tuple[int,int,int,int],
+                     activation_bits: int = 8,
+                     include_elementwise: bool = False):
     """
-    Profiles your EXACT 2D pipeline (frozen backbone + linear head) using ONLY values from cfg.
-    Call this before tasks (and optionally inside each task after you update cfg['kd_prev_rows']).
+    Returns:
+      macs_total, peak_act_bytes, per-module dicts {name->value}
+    Counts Conv2d/Linear MACs; optional 1 op/elem for BN/ReLU/Pool.
+    Peak activation = largest single output tensor (assuming single-buffer).
     """
-    assert hasattr(model, "backbone") and hasattr(model, "gap") and hasattr(model, "proj") and hasattr(model, "head")
+    device = next(model.parameters()).device
+    model.eval()
 
-    # -------- read knobs from cfg (with fallbacks) --------
-    img_size                 = int(cfg['img_size'])
-    batch_size_train         = int(cfg['CIL_batch_size_train'])
-    batch_size_infer         = int(cfg.get("CIL_batch_size_test", 32))
-    replay_size              = int(cfg.get("buffer_size", 3000))
-    optimizer_kind           = str(cfg.get("optimizer", "adam"))
-    deployed_bits_backbone   = int(cfg.get("deployed_bits_backbone", 32))
-    deployed_bits_classifier = int(cfg.get("deployed_bits_classifier", 32))
-    training_bits_classifier = int(cfg.get("training_bits_classifier", 32))
-    replay_bits              = int(cfg.get("replay_bits", 8))
-    activation_bits_train    = int(cfg.get("activation_bits_train", 32))  # you are training in PyTorch; 32 is safe
-    activation_bits_infer    = int(cfg.get("activation_bits_infer", 32))
-    replay_batch_size        = int(cfg.get("replay_batch_size", 1))
-    kd_prev_rows             = int(cfg.get("kd_prev_rows", 0))     # set this in-loop if KD active
-    kd_enabled               = bool(cfg.get("kd_enabled", True))
-    autograd_grad_for_cwi    = bool(cfg.get("autograd_grad_for_cwi", True))
-    metrics_path             = cfg.get("metrics_path", None)
+    macs_per_module = defaultdict(float)
+    params_per_module = defaultdict(int)
+    peak_act_bytes_per_module = defaultdict(int)
+    peak_activation_bytes = 0
 
-    # ----- params -----
-    bb_params   = _count_params(model.backbone) + _count_params(model.gap) + _count_params(model.proj)
-    head_params = _count_params(model.head)
-    total_params = bb_params + head_params
+    def num_params_local(m):
+        return sum(p.numel() for p in m.parameters(recurse=False))
 
-    in_dim  = int(model.head.in_dim)   # feat_dim
-    out_dim = int(model.head.out_dim)
-    nz_frac = _nz_frac_from_head(model.head)
+    def hook_fn(name, m):
+        def fn(mod, inp, out):
+            nonlocal peak_activation_bytes
+            y = out
+            # params (module-local)
+            params_per_module[name] += num_params_local(mod)
 
-    # ----- deployment memory (assume int8 for both unless overridden) -----
-    bb_MB          = bb_params   * (deployed_bits_backbone   / 8) / 1_048_576
-    head_MB_dense  = head_params * (deployed_bits_classifier / 8) / 1_048_576
-    # sparse head: weight zeros removed, bias kept
-    num_w = model.head.linear.weight.numel()
-    num_b = model.head.linear.bias.numel() if model.head.linear.bias is not None else 0
-    head_MB_sparse = ((num_w * nz_frac) + num_b) * (deployed_bits_classifier / 8) / 1_048_576
-    tot_MB_dense   = bb_MB + head_MB_dense
-    tot_MB_sparse  = bb_MB + head_MB_sparse
+            macs = 0.0
+            if isinstance(mod, nn.Conv2d):
+                n, cout, h, w = y.shape
+                cin = mod.in_channels
+                kh, kw = mod.kernel_size
+                groups = mod.groups
+                macs = n * h * w * cout * (cin // groups) * kh * kw
+            elif isinstance(mod, nn.Linear):
+                n = y.shape[0]
+                macs = n * mod.in_features * mod.out_features
+            elif include_elementwise and isinstance(mod, (nn.BatchNorm2d, nn.ReLU, nn.ReLU6, nn.SiLU, nn.AdaptiveAvgPool2d, nn.MaxPool2d, nn.AvgPool2d)):
+                macs = y.numel()
 
-    # ----- compute MACs per sample (follow your real backbone) -----
-    H = W = int(img_size)
-    conv_specs = _scan_conv2d_specs(model.backbone)
-    macs_bb = 0
-    peak_act_elems_infer = 3 * H * W  # input as a candidate
-    last_out_C = None
+            macs_per_module[name] += macs
 
-    for Cin, Cout, k, s, p, d in conv_specs:
-        H, W = _conv2d_out_hw(H, W, k, s, p, d)
-        macs_bb += H * W * Cout * (Cin * k * k)
-        peak_act_elems_infer = max(peak_act_elems_infer, Cout * H * W)
-        last_out_C = Cout
+            # activation size (approx: single output tensor)
+            out_bytes = y.numel() * (activation_bits // 8)
+            peak_activation_bytes = max(peak_activation_bytes, out_bytes)
+            peak_act_bytes_per_module[name] = max(peak_act_bytes_per_module[name], out_bytes)
+        return fn
 
-    final_hw = (H, W)
-    # GAP → (C, 1, 1), then proj last_out_C → feat_dim
-    proj_in = int(last_out_C if last_out_C is not None else 256)
-    macs_proj = proj_in * in_dim
-    macs_head_dense  = in_dim * out_dim
-    macs_head_sparse = int(in_dim * out_dim * nz_frac)
-    macs_total_sparse = macs_bb + macs_proj + macs_head_sparse
+    hooks = []
+    # only leaf modules
+    for name, m in model.named_modules():
+        if len(list(m.children())) == 0:
+            hooks.append(m.register_forward_hook(hook_fn(name, m)))
 
-    # ----- training MACs per batch (head-only training) -----
-    B = int(batch_size_train)
-    R = int(max(0, replay_batch_size))
-    # live forward: backbone+proj+head (sparse)
-    macs_live  = B * (macs_bb + macs_proj + macs_head_sparse)
-    # replay forward: head only
-    macs_replay = R * macs_head_sparse
-    # backward equivalents on head
-    head_bwd_equiv = 1  # final loss.backward
-    if autograd_grad_for_cwi:
-        head_bwd_equiv += 1            # extra grad(live)
-        if R > 0:
-            head_bwd_equiv += 1        # extra grad(replay)
-    macs_head_bwd = head_bwd_equiv * (B * macs_head_sparse)
-    # KD/DDR: extra backbone+proj on live (feats recomputed) + partial head over prev rows
-    macs_kd = 0
-    if kd_enabled and kd_prev_rows > 0:
-        macs_kd += B * (macs_bb + macs_proj)
-        macs_kd += B * (in_dim * kd_prev_rows)
-    macs_train_batch_sparse = macs_live + macs_replay + macs_head_bwd + macs_kd
+    x = torch.zeros(*input_size, device=device)
+    _ = model(x)
 
-    # ----- SRAM: head-only training persistent (fp32 unless overridden) -----
-    bpp = training_bits_classifier / 8
-    w_bytes   = head_params * bpp
-    g_bytes   = head_params * bpp
-    if optimizer_kind.lower() == "adam":
-        opt_bytes = 2 * head_params * bpp
-    elif optimizer_kind.lower() in ("sgd","sgd_momentum","momentum"):
-        opt_bytes = 1 * head_params * bpp
+    for h in hooks:
+        h.remove()
+
+    macs_total = sum(macs_per_module.values())
+    return macs_total, peak_activation_bytes, dict(macs_per_module), dict(params_per_module), dict(peak_act_bytes_per_module)
+
+# ---------- Head / buffers / replay sizing ----------
+def _head_resources(head_linear: nn.Linear,
+                    feat_dim: int,
+                    num_classes: int,
+                    train_dtype_bits: int = 32,
+                    infer_dtype_bits: int = 8,
+                    optimizer: str = "adam") -> Dict:
+    params = feat_dim * num_classes + num_classes
+    macs_infer = feat_dim * num_classes
+    flash_kB_int8 = params / 1024
+    flash_kB_fp32 = (params * 4) / 1024
+
+    # Optimizer state (Adam: weights + m + v), SGD(mom): weights + mom
+    if optimizer.lower() == "adam":
+        train_state_bytes = params * 3 * (train_dtype_bits // 8)
+    elif optimizer.lower() in ("sgd", "momentum", "sgd_momentum", "sgdm"):
+        train_state_bytes = params * 2 * (train_dtype_bits // 8)
     else:
-        opt_bytes = 0
+        train_state_bytes = params * (train_dtype_bits // 8)  # conservative
 
-    # CWI buffers (cwi, cwi_curr, cwi_mem) + mask (kept fp32 in your code)
-    cwi_bytes  = 3 * num_w * bpp
-    mask_bytes = num_w * bpp
+    return {
+        "params": params,
+        "flash_kB_INT8": flash_kB_int8,
+        "flash_kB_FP32": flash_kB_fp32,
+        "infer_macs_per_sample": macs_infer,
+        "infer_macs_per_sample_M": macs_infer / 1e6,
+        "train_state_kB_FP32_est": train_state_bytes / 1024,
+        "act_bytes_per_sample_INFER": feat_dim * (infer_dtype_bits // 8),
+        "act_bytes_per_sample_TRAIN": feat_dim * (train_dtype_bits // 8),
+    }
 
-    # teacher snapshot (if KD active)
-    teacher_bytes = 0
-    if kd_enabled and kd_prev_rows > 0:
-        teacher_bytes = (kd_prev_rows * in_dim + kd_prev_rows) * bpp
+def _tdm_buffers_bytes(head_module) -> int:
+    """
+    Accounts for mask, cwi, cwi_curr, cwi_mem (same shape as weight).
+    """
+    W = head_module.linear.weight
+    elems = W.numel()
+    # mask is float tensor in your code; if you later store as bool, divide by 4.
+    bytes_mask = elems * 4
+    bytes_cwi_pack = elems * 4 * 3  # cwi, cwi_curr, cwi_mem
+    return bytes_mask + bytes_cwi_pack
 
-    # replay memory (INT8 + 4-byte scale + 2-byte label) per latent
-    replay_per = int(in_dim * (replay_bits/8) + 4 + 2)
-    replay_total = replay_size * replay_per
+# ---------- Public API ----------
+@torch.no_grad()
+def profile_tinyml_cil(model: nn.Module,
+                       input_size: Tuple[int,int,int,int] = (1,3,160,160),
+                       activation_bits_infer: int = 8,
+                       activation_bits_train: int = 32,
+                       weight_bits_deployed: int = 8,
+                       batch_size_train: int = 32,
+                       replay_size: int = 0,
+                       replay_bits: int = 8,
+                       optimizer: str = "adam",
+                       include_elementwise: bool = False) -> Dict:
+    """
+    Profiles a CIL model with frozen backbone:
+      - backbone+gap+proj MACs & peak activation (inference path)
+      - params & flash (backbone+proj and head)
+      - head training memory (params + optimizer states)
+      - replay buffer memory (latent-based)
+      - TDM buffers (mask + cwi*)
+    Expects model to have attributes: backbone, gap, proj, head (nn.Linear inside).
+    """
+    device = next(model.parameters()).device
+    model.eval()
 
-    # training activations (head-only): features buffer (B, in_dim)
-    act_train_bytes = B * in_dim * (activation_bits_train / 8)
+    # expose frozen feature extractor (backbone->gap->proj)
+    feat_dim = model.head.in_dim
+    num_classes = model.head.out_dim
 
-    # inference activations (B=1): peak across conv outputs (already tracked)
-    act_infer_bytes = peak_act_elems_infer * (activation_bits_infer / 8)
+    frozen = _FrozenFeatExtractor(model).to(device).eval()
 
-    report = CILProfile2D(
-        backbone_params=bb_params,
-        head_params=head_params,
-        total_params=total_params,
-        head_nonzero_frac=nz_frac,
-
-        deployed_backbone_MB=bb_MB,
-        deployed_head_dense_MB=head_MB_dense,
-        deployed_head_sparse_MB=head_MB_sparse,
-        deployed_total_dense_MB=tot_MB_dense,
-        deployed_total_sparse_MB=tot_MB_sparse,
-
-        head_weights_MB=w_bytes/1_048_576,
-        head_grads_MB=g_bytes/1_048_576,
-        head_opt_MB=opt_bytes/1_048_576,
-        cwi_buffers_MB=cwi_bytes/1_048_576,
-        mask_MB=mask_bytes/1_048_576,
-        teacher_snapshot_MB=teacher_bytes/1_048_576,
-        replay_total_MB=replay_total/1_048_576,
-        replay_per_sample_B=replay_per,
-        activations_train_MB=act_train_bytes/1_048_576,
-
-        activations_infer_MB=act_infer_bytes/1_048_576,
-
-        macs_backbone_per_sample_M=macs_bb/1_000_000,
-        macs_proj_per_sample_M=macs_proj/1_000_000,
-        macs_head_per_sample_dense_M=macs_head_dense/1_000_000,
-        macs_head_per_sample_sparse_M=macs_head_sparse/1_000_000,
-        macs_total_fwd_sparse_per_sample_M=macs_total_sparse/1_000_000,
-        macs_train_per_batch_sparse_M=macs_train_batch_sparse/1_000_000,
-
-        final_feat_hw=final_hw,
-        proj_in_channels=proj_in,
-        feat_dim=in_dim,
-        head_out_dim=out_dim,
+    # Inference path profile (backbone+proj)
+    macs_total, peak_act_bytes, per_macs, per_params_local, per_peak_act = _profile_forward(
+        frozen, input_size=input_size, activation_bits=activation_bits_infer, include_elementwise=include_elementwise
     )
 
-    # optional save
-    if metrics_path:
-        d = report.pretty()
-        with open(metrics_path, "w") as f:
-            for k, v in d.items():
-                f.write(f"{k}: {v}\n")
-        print(f"[metrics] Saved 2D CIL profile to {metrics_path}")
+    # Params/flash for backbone+proj only (use module tree)
+    params_backbone_proj = sum(p.numel() for n, p in frozen.named_parameters())
+    flash_backbone_proj_int8_kB = params_backbone_proj / 1024
+    flash_backbone_proj_fp32_kB = (params_backbone_proj * 4) / 1024
+
+    # Head stats (linear only; TDM head wraps nn.Linear)
+    head_lin: nn.Linear = model.head.linear
+    head_stat = _head_resources(
+        head_lin, feat_dim, num_classes,
+        train_dtype_bits=32, infer_dtype_bits=activation_bits_infer, optimizer=optimizer
+    )
+
+    # Deployed flash total
+    flash_total_int8_kB = flash_backbone_proj_int8_kB + head_stat["flash_kB_INT8"]
+    flash_total_fp32_kB = flash_backbone_proj_fp32_kB + head_stat["flash_kB_FP32"]
+
+    # Replay buffer footprint (latent only; add a small per-sample header if you like)
+    # If you store INT8 latents length=feat_dim, bytes/sample = feat_dim * (replay_bits/8).
+    replay_per_sample_bytes = feat_dim * (replay_bits // 8)
+    replay_total_bytes = replay_size * replay_per_sample_bytes
+
+    # Training activations (head-only train): batch_size * feat_dim * 4 bytes (FP32)
+    train_acts_bytes = batch_size_train * feat_dim * 4
+
+    # TDM buffers (mask + cwi + cwi_curr + cwi_mem)
+    tdm_buffers_bytes = _tdm_buffers_bytes(model.head)
+
+    # Compose report
+    def kb(x): return x / 1024
+    def mb(x): return x / (1024*1024)
+
+    report = {
+        "config": {
+            "input_size": input_size,
+            "activation_bits_infer": activation_bits_infer,
+            "activation_bits_train": activation_bits_train,
+            "weight_bits_deployed": weight_bits_deployed,
+            "batch_size_train": batch_size_train,
+            "replay_size": replay_size,
+            "replay_bits": replay_bits,
+            "optimizer": optimizer,
+        },
+        "backbone_proj": {
+            "params": params_backbone_proj,
+            "flash_INT8_kB": flash_backbone_proj_int8_kB,
+            "flash_FP32_kB": flash_backbone_proj_fp32_kB,
+            "macs_per_sample": macs_total,
+            "macs_per_sample_M": macs_total / 1e6,
+            "peak_activation_bytes": peak_act_bytes,
+            "peak_activation_kB": kb(peak_act_bytes),
+            "peak_activation_MB": mb(peak_act_bytes),
+            "per_module_macs": dict(sorted(per_macs.items(), key=lambda kv: kv[1], reverse=True)),
+            "per_module_peak_act_bytes": dict(sorted(per_peak_act.items(), key=lambda kv: kv[1], reverse=True)),
+        },
+        "head": head_stat,
+        "deployed_total": {
+            "flash_INT8_kB": flash_total_int8_kB,
+            "flash_FP32_kB": flash_total_fp32_kB,
+            "macs_per_sample_M": (macs_total / 1e6) + head_stat["infer_macs_per_sample_M"],
+        },
+        "training_overheads": {
+            "head_train_state_kB_FP32_est": head_stat["train_state_kB_FP32_est"],
+            "train_activations_bytes_head_only": train_acts_bytes,
+            "train_activations_kB_head_only": kb(train_acts_bytes),
+        },
+        "replay": {
+            "feat_dim": feat_dim,
+            "replay_per_sample_bytes": replay_per_sample_bytes,
+            "replay_per_sample_kB": kb(replay_per_sample_bytes),
+            "replay_total_bytes": replay_total_bytes,
+            "replay_total_kB": kb(replay_total_bytes),
+        },
+        "tdm_buffers": {
+            "bytes": tdm_buffers_bytes,
+            "kB": kb(tdm_buffers_bytes),
+        }
+    }
     return report
+
+def pretty_print_tinyml_report(report: Dict):
+    def fmt_kb(x): return f"{x:.1f} kB"
+    def fmt_mb(x): return f"{x:.3f} MB"
+    tot = report["deployed_total"]
+    bb = report["backbone_proj"]
+    head = report["head"]
+    tr = report["training_overheads"]
+    rp = report["replay"]
+    tdm = report["tdm_buffers"]
+
+    print("\n=== TinyML Profile ===")
+    print(f"Input: {report['config']['input_size']}, infer_act_bits={report['config']['activation_bits_infer']}, deployed_w_bits={report['config']['weight_bits_deployed']}")
+    print(f"Backbone+Proj params: {bb['params']:,} | Flash INT8: {fmt_kb(bb['flash_INT8_kB'])} | Flash FP32: {fmt_kb(bb['flash_FP32_kB'])}")
+    print(f"Backbone+Proj MACs / sample: {bb['macs_per_sample_M']:.2f} M")
+    print(f"Peak activation (single tensor): {fmt_kb(bb['peak_activation_kB'])} ({fmt_mb(bb['peak_activation_MB'])})")
+    print(f"Head params: {head['params']:,} | Flash INT8: {head['flash_kB_INT8']:.1f} kB | MACs/sample: {head['infer_macs_per_sample_M']:.3f} M")
+    print(f"--- Deployed total ---")
+    print(f"Flash INT8 total: {fmt_kb(tot['flash_INT8_kB'])} | FP32 total: {fmt_kb(tot['flash_FP32_kB'])}")
+    print(f"MACs total / sample: {tot['macs_per_sample_M']:.2f} M")
+    print(f"--- Training (head only) ---  optimizer={report['config']['optimizer']}")
+    print(f"Head train state (FP32 est): {tr['head_train_state_kB_FP32_est']:.1f} kB | Train activations/head/batch: {tr['train_activations_kB_head_only']:.2f} kB")
+    print(f"--- Replay ---  feat_dim={rp['feat_dim']}, buffer={report['config']['replay_size']}, bits/sample={report['config']['replay_bits']}")
+    print(f"Replay per sample: {rp['replay_per_sample_kB']:.3f} kB | Total: {rp['replay_total_kB']:.1f} kB")
+    print(f"TDM buffers (mask + cwi*): {tdm['kB']:.1f} kB")

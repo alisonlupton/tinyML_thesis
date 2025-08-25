@@ -1,52 +1,118 @@
 # cnn_CIL_training_utils.py
 
-from sklearn.model_selection import GroupShuffleSplit
+# from sklearn.model_selection import GroupShuffleSplit
 import numpy as np
 import torch
 from utils import normalize_features, kd_loss_ce, make_global_to_local_map
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
+import random 
+from collections import defaultdict
+from math import ceil
 
-def load_CIL_data(dog_data, target_dog, all_behaviors, behavior_to_idx, train_mean, train_std):
+def split_by_testnum_for_CIL(dog_data, target_dog, verbose=True):
+    
+    """
+    Put ALL windows from one TestNum into train, ALL from another TestNum into test.
+    By default, chooses the LARGER session (more windows) as train, the smaller as test.
+    """
 
-    # convert to np for sklearn (need for splitting)
-    X_target = dog_data[target_dog]['X'].numpy()
-    y_target = dog_data[target_dog]['y'].numpy().copy()
-    segment_ids = dog_data[target_dog]['segment_ids']
+    sess_ids = dog_data[target_dog]['session_ids']   # (N, 2) [DogID, TestNum]
+    if sess_ids is None:
+        raise ValueError(f"Dog {target_dog} has no session_ids saved in the NPZ.")
+    if sess_ids.shape[1] < 2:
+        raise ValueError(f"Dog {target_dog} session_ids should be (N,2) = [DogID, TestNum]. Got shape {sess_ids.shape}.")
 
-    # GroupShuffleSplit to prevent temporal leakage (n_splits return one for each dog)
-    gss = GroupShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
-    train_idx, test_idx = next(gss.split(X_target, y_target, groups=segment_ids))
+    testnums = np.unique(sess_ids[:, 1])
+    if len(testnums) < 2:
+        raise ValueError(f"Dog {target_dog} has only {len(testnums)} session(s): {testnums}. Need at least 2 to split.")
 
-        
-    X_train_np, X_test_np = X_target[train_idx], X_target[test_idx]
-    y_train_np, y_test_np = y_target[train_idx], y_target[test_idx]
+    train_session = test_session = None
+    counts = {tn: (sess_ids[:, 1] == tn).sum() for tn in testnums}
+    sorted_sessions = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    train_session = sorted_sessions[0][0]  # session with most windows
+    test_session  = sorted_sessions[1][0]  # session with second-most windows
 
-    print(f"Segment-aware split: {len(X_train_np)} train samples, {len(X_test_np)} test samples")
-    print(f"Train segments: {len(np.unique(segment_ids[train_idx]))}, Test segments: {len(np.unique(segment_ids[test_idx]))}")
-    print(f"Ensuring no segment overlap: {len(set(segment_ids[train_idx]) & set(segment_ids[test_idx])) == 0}")
+    if train_session == test_session:
+        raise ValueError("train_session and test_session must be different.")
 
-    # Print target dog class distribution
-    # class distribution (using global 0..6 labels)
-    print(f"\n--- TARGET DOG {target_dog} CLASS DISTRIBUTION ---")
-    for i, cls in enumerate(all_behaviors):
-        trn = int(np.sum(y_train_np == behavior_to_idx[cls]))
-        tst = int(np.sum(y_test_np  == behavior_to_idx[cls]))
-        print(f"  {cls}: {trn} train, {tst} test")
+    train_mask = (sess_ids[:, 1] == train_session)
+    test_mask  = (sess_ids[:, 1] == test_session)
 
-    # Normalize target dog data using SAME backbone training statistics
+    if verbose:
+        print(f"[CIL split] Dog {target_dog}: train session={train_session} ({train_mask.sum()} windows), "
+              f"test session={test_session} ({test_mask.sum()} windows)")
+
+    return train_mask, test_mask, train_session, test_session
+
+def check_CIL_validity(dog_data, target_dog, all_behaviors, behavior_to_idx, verbose):
+    
+    """
+    Returns True iff this dog has >0 train AND >0 test windows for every behavior
+    when splitting by session (TestNum). You can force which two sessions to use,
+    otherwise it picks the first two by TestNum.
+    """
+    y = dog_data[target_dog]['y'].numpy()
+    try:
+        train_mask, test_mask, tr_sess, te_sess = split_by_testnum_for_CIL(dog_data, target_dog, verbose=True)
+    except ValueError as e:
+        if verbose:
+            print(f"[CIL validity] Dog {target_dog}: {e}")
+        return False
+
+    y_tr = y[train_mask]
+    y_te = y[test_mask]
+
+    for cls in all_behaviors:
+        gid = behavior_to_idx[cls]
+        trn = int(np.sum(y_tr == gid))
+        tst = int(np.sum(y_te == gid))
+        if trn == 0 or tst == 0:
+            if verbose:
+                print(f"[CIL validity] Dog {target_dog}: class '{cls}' has train={trn}, test={tst} (session split {tr_sess}/{te_sess})")
+            return False
+
+    if verbose:
+        print(f"[CIL validity] Dog {target_dog} is VALID with sessions {tr_sess}/{te_sess}.")
+    return True
+
+def load_CIL_data(dog_data, target_dog, all_behaviors, behavior_to_idx, train_mean, train_std, seed, verbose):
+    """
+    Build X_train/X_test from two different sessions of the SAME dog.
+    Normalizes with provided train_mean/std from backbone training.
+    """
+    X = dog_data[target_dog]['X'].numpy()     # (N, C, L)
+    y = dog_data[target_dog]['y'].numpy().copy()
+    # segment_ids = dog_data[target_dog]['segment_ids']  # not needed here
+    train_mask, test_mask, tr_sess, te_sess = split_by_testnum_for_CIL(
+        dog_data, target_dog, verbose=verbose
+    )
+
+    X_train_np, X_test_np = X[train_mask], X[test_mask]
+    y_train_np, y_test_np = y[train_mask], y[test_mask]
+
+    if verbose:
+        print(f"Dog {target_dog}: session {tr_sess} → train ({len(X_train_np)} windows), "
+              f"session {te_sess} → test ({len(X_test_np)} windows)")
+        print(f"\n--- TARGET DOG {target_dog} CLASS DISTRIBUTION (session-split) ---")
+        for cls in all_behaviors:
+            gid = behavior_to_idx[cls]
+            trn = int(np.sum(y_train_np == gid))
+            tst = int(np.sum(y_test_np  == gid))
+            print(f"  {cls}: {trn} train, {tst} test")
+
+    # normalize using backbone stats
     X_train_np = normalize_features(X_train_np, train_mean, train_std)
     X_test_np  = normalize_features(X_test_np,  train_mean, train_std)
 
-    # Back to tensors for loaders/models
+    # back to tensors
     X_train = torch.from_numpy(X_train_np).float()
     y_train = torch.from_numpy(y_train_np).long()
     X_test  = torch.from_numpy(X_test_np).float()
     y_test  = torch.from_numpy(y_test_np).long()
-    
-    return X_train, y_train, X_test, y_test
 
+    return X_train, y_train, X_test, y_test
 
 def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_num,
                               train_loader, behavior_to_idx, optimizer, criterion, device,
@@ -131,7 +197,11 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
             epoch_correct += (pred == batch_y_local).sum().item()
             epoch_loss += float(loss.item())
 
-    print(f"epoch {epoch:02d} | train_acc={100*epoch_correct/epoch_total:.1f} | loss={epoch_loss/len(train_loader):.3f}")
+    train_acc = 100 * epoch_correct / epoch_total
+    train_loss = epoch_loss / len(train_loader)
+    print(f"epoch {epoch:02d} | train_acc={train_acc:.1f} | loss={train_loss:.3f}")
+    
+    return train_loss, train_acc
 
         
 def CIL_post_task_eval(seen_classes, test_loader, device, all_behaviors, model, registry):
