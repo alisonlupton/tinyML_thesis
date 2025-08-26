@@ -38,15 +38,7 @@ cil_tasks:
   [
     ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing"],
     ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing", "Trotting"],
-    [
-      "Standing",
-      "Walking",
-      "Sitting",
-      "Lying chest",
-      "Sniffing",
-      "Trotting",
-      "Galloping",
-    ],
+    ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing", "Trotting", "Galloping",],
   ]
 
 # Backbone training

@@ -1,10 +1,14 @@
 # cnn_backbone_training_utils.py
-import torch 
+import torch
+import copy
+import torch.nn as nn
 from dataclasses import dataclass
 from utils import build_tensors
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from typing import Tuple, Dict, Optional
+from torch.ao.quantization import get_default_qconfig, fuse_modules, prepare, convert, QuantStub, DeQuantStub
+
 
 @dataclass
 class BackboneData:
@@ -20,31 +24,24 @@ class BackboneData:
     val_tf: list
     
     
-def _make_transforms(img_size):
-    backbone_train_tf = transforms.Compose([
-        transforms.RandomResizedCrop(img_size, scale=(0.6, 1.0), ratio=(0.75, 1.33)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
-    ])
+def _make_transforms(cfg):
+    deploy_tf = transforms.Compose([
+    transforms.Resize((cfg['img_size'], cfg['img_size'])),   # match student + MCU
+    transforms.ToTensor(),
+    transforms.Normalize(cfg['mean_tf'], cfg['std_tf']),
+])
+    backbone_train_tf = deploy_tf
     CIL_train_tf = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.RandomHorizontalFlip(),
+        transforms.Resize((cfg['img_size'], cfg['img_size'])),
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
-        ])
-    
-    val_tf = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
+        transforms.Normalize(cfg['mean_tf'], cfg['std_tf']),
     ])
+    val_tf = deploy_tf
     return backbone_train_tf, CIL_train_tf, val_tf
 
 def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     
-    img_size = cfg['img_size']
     backbone_df = dog_data[dog_data["gid"].isin(backbone_dogs)].copy()
 
     # Stable local label mapping (0..B-1)
@@ -56,7 +53,7 @@ def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     df_val  = backbone_df[backbone_df["split"]=="test"].copy()
 
 
-    backbone_train_tf, CIL_train_tf,  val_tf = _make_transforms(img_size)
+    backbone_train_tf, CIL_train_tf,  val_tf = _make_transforms(cfg)
     
     X_train, y_train = build_tensors(df_train, backbone_train_tf)
     X_val, y_val = build_tensors(df_val, val_tf)
@@ -139,4 +136,55 @@ def eval_new_classes_on_backbone(model,
     per_class = {c: (100.0 * cls_cor[c] / cls_tot[c] if cls_tot[c] > 0 else 0.0)
                  for c in range(num_classes)}
     return overall, per_class
-  
+
+# Quantisation Helpers
+
+def _fuse_cbr_blocks_inplace(backbone: nn.Sequential):
+    for _, m in backbone.named_children():
+        if isinstance(m, nn.Sequential) and len(m) >= 3:
+            if isinstance(m[0], nn.Conv2d) and isinstance(m[1], nn.BatchNorm2d) and isinstance(m[2], nn.ReLU):
+                fuse_modules(m, ['0','1','2'], inplace=True)
+
+class QuantBackboneWrapper(nn.Module):
+    def __init__(self, backbone: nn.Sequential):
+        super().__init__()
+        self.quant = QuantStub()
+        self.backbone = copy.deepcopy(backbone)
+        self.dequant = DeQuantStub()
+        self.gap = nn.AdaptiveAvgPool2d(1)  # do GAP in float for portability
+    def forward(self, x):
+        x = self.quant(x)
+        x = self.backbone(x)
+        x = self.dequant(x)   # back to float
+        x = self.gap(x)
+        return x
+
+@torch.no_grad()
+def quantise_frozen_backbone(student_backbone: nn.Sequential, calib_loader):
+    qb = QuantBackboneWrapper(student_backbone).to('cpu').eval()
+    _fuse_cbr_blocks_inplace(qb.backbone)
+    qb.qconfig = get_default_qconfig('qnnpack')
+    qb_prepared = prepare(qb, inplace=False)
+    for i, (images, _) in enumerate(calib_loader):
+        _ = qb_prepared(images.to('cpu'))
+        if i >= 20: break
+    qb_int8 = convert(qb_prepared, inplace=False).eval()
+    return qb_int8
+
+def features_quantized(self, x):
+    h = self.quant_backbone(x)  # float, shape (N,160,1,1)
+    return h.flatten(1)         # (N,160)
+
+@torch.no_grad()
+def compute_perchannel_scales(calib_loader, cil_model, pct=99.9, eps=1e-8):
+    feats_all = []
+    for i, (images, _) in enumerate(calib_loader):
+        f = cil_model._features(images)     # [B, C] FP32 (after dequant + GAP)
+        feats_all.append(f)
+        if i >= 20: break                   # ~20 batches is plenty
+    F = torch.cat(feats_all, dim=0)         # [N, C]
+    hi = torch.quantile(F.abs(), q=pct/100.0, dim=0)   # [C]
+    max_abs = torch.clamp(hi, min=eps)
+    scales = (max_abs / 127.0).contiguous()           # symmetric, zp=0
+    return scales
+

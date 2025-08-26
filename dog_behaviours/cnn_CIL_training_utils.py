@@ -145,7 +145,7 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
 
         # ---- forward: replay
         replay_loss = None
-        if len(replay_buffer_q) > 0 and task_idx > 0:
+        if len(replay_buffer_q) > cfg['replay_batch_size']:
             replay_batch_size = cfg['replay_batch_size']
             replay_feats, replay_targets_global = replay_buffer_q.sample_q(replay_batch_size, seen_global_ids, device=device)
             if replay_feats is not None:

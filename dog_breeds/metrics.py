@@ -6,16 +6,14 @@ from typing import Dict, Tuple, Optional
 
 # ---------- Core hook-based profiler over backbone + proj ----------
 class _FrozenFeatExtractor(nn.Module):
-    """Wraps a CIL model to expose backbone->gap->proj and return features only."""
+    """Expose z = proj(_features(x)) for profiling."""
     def __init__(self, cil_model: nn.Module):
         super().__init__()
-        self.backbone = cil_model.backbone
-        self.gap = cil_model.gap
-        self.proj = cil_model.proj
+        self.model = cil_model      # keep full model (uses quant path inside)
+        self.proj = cil_model.proj  # same proj module you train
     def forward(self, x):
-        x = self.backbone(x)
-        x = self.gap(x).flatten(1)
-        z = self.proj(x)    # (N, feat_dim)
+        feats = self.model._features(x)   # (N, D_backbone) e.g., 160
+        z = self.proj(feats)              # (N, feat_dim)   e.g., 128
         return z
 
 @torch.no_grad()

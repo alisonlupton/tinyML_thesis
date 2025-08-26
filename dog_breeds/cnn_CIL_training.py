@@ -4,18 +4,21 @@ Simplified TDM Pipeline with Intelligent Sampling: Following SparCL paper more c
 """
 
 import torch
+torch.backends.quantized.engine = 'qnnpack'  
+
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from process_dog_data import process_dog_data
-from utils import load_config, set_seed , ClassRegistry
+from utils import load_config, set_seed, ClassRegistry
 from metrics import profile_tinyml_cil, pretty_print_tinyml_report
 from models.cnn import TunedMCUCILCNN_M3
-from cnn_backbone_training_utils import load_data_cnn_backbone, eval_new_classes_on_backbone
+from cnn_backbone_training_utils import load_data_cnn_backbone, eval_new_classes_on_backbone, quantise_frozen_backbone, features_quantized, compute_perchannel_scales
 from cnn_CIL_training_utils import seen_and_new, load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots
 from replay import BalancedQuantReplayDynamic
 import json
 from pathlib import Path
 import pandas as pd
+import types
 
 def build_seen_df(full_df: pd.DataFrame, seen_gids: list[int]) -> pd.DataFrame:
     """
@@ -53,9 +56,8 @@ def main():
         return
     
     # Device setup
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     print(f"Using device: {device}")
-    
     
     #####################################################################################################################
     #--------------------------------------- STEP 1: LOAD TRAINED STUDENT MODEL
@@ -66,8 +68,6 @@ def main():
     print(f"{'='*50}")
     
     # Load trained student model (tuned MCU version)
-    
-    
     print(f"Loading tuned MCU student model from: {student_path}")
     print(f"Loading student metadata from: {student_meta_path}")
     
@@ -96,7 +96,7 @@ def main():
     backbone_data = load_data_cnn_backbone(cfg, backbone_gids, full_df)
     
     #####################################################################################################################
-    #--------------------------------------- STEP 2: SET UP CIL MODEL
+    #--------------------------------------- STEP 2: SET UP CIL MODEL AND QUANTISE BACKBONE
     #####################################################################################################################
     print(f"\n{'='*50}")
     print("STEP 2: CIL TRAINING")
@@ -113,17 +113,33 @@ def main():
     cil_model.backbone.load_state_dict(backbone_model.backbone.state_dict())
     cil_model.proj.load_state_dict(backbone_model.proj.state_dict())   # have to load proj also
 
-    # Freeze CIL backbone
-    for param in cil_model.backbone.parameters():
-        param.requires_grad = False
+    
+    # QUANTISATION
+    
+    # calibration (using training transforms)
+    max_calib = 1024
+    calib_imgs = backbone_data.X_train[:min(max_calib, len(backbone_data.X_train))]
+
+    calib_loader = DataLoader(
+        TensorDataset(calib_imgs, torch.zeros(len(calib_imgs))),
+        batch_size=32,
+        shuffle=False
+    )
+    #TODO: check transforms 
+    
+    # build INT8 CPU backbone
+    qb_int8 = quantise_frozen_backbone(cil_model.backbone, calib_loader)
+
+    # switch model’s feature path to the quantized one (CPU float out)
+    cil_model.quant_backbone = qb_int8           # lives on CPU
+    cil_model.backbone = nn.Identity()  # ensure I'm only using int8
+
+    cil_model._features = types.MethodType(features_quantized, cil_model)
+    # compute per-channel scales once
+    scales = compute_perchannel_scales(calib_loader, cil_model, pct=99.9)   
+
     for p in cil_model.proj.parameters():
         p.requires_grad = False
-        
-    # batchnorm still runs, but doesn't update 
-    cil_model.backbone.eval()
-    for m in cil_model.backbone.modules():
-        if isinstance(m, nn.BatchNorm2d):
-            m.eval()
     
     #####################################################################################################################        
     #--------------------------------------- STEP 3: SET UP CIL SCENARIO
@@ -133,8 +149,13 @@ def main():
     backbone_registry = ClassRegistry(gid2name=gid2breed)
     backbone_registry.add_gids(backbone_gids) 
     
-    # Initialize replay buffer
-    replay_buffer_q = BalancedQuantReplayDynamic(buffer_size=cfg['buffer_size'])
+    # Initialize replay buffer with known feat_dim and set scales
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, cfg['img_size'], cfg['img_size'])
+        feat_dim_backbone = cil_model._features(dummy).shape[1]  # should be 160
+
+    replay_buffer_q = BalancedQuantReplayDynamic(buffer_size=cfg['buffer_size'], feat_dim=feat_dim_backbone)
+    replay_buffer_q.set_scales(scales)
     
     registry = ClassRegistry(gid2name=gid2breed)
     registry.add_gids(backbone_gids)  # seed with base backbone dogs
@@ -203,7 +224,7 @@ def main():
             report = profile_tinyml_cil(
                 model=cil_model,
                 input_size=(1,3,160,160),
-                activation_bits_infer=32,   # inference path is still FP32
+                activation_bits_infer=8,   # inference path is still FP32
                 activation_bits_train=32,   # head training in FP32
                 weight_bits_deployed=32,    # model params are stored in FP32 right now
                 batch_size_train=cfg['CIL_batch_size_train'],
@@ -220,6 +241,12 @@ def main():
             
         # update replay buffer
         replay_buffer_q.on_new_task(seen_plus_backbone)
+        print(f"\n=== REPLAY BUFFER UPDATE ===")
+        print(f"  Task {task_idx+1}: Added classes {new_gids}")
+        print(f"  Total seen classes: {seen_plus_backbone}")
+        print(f"  Replay buffer size: {len(replay_buffer_q)}")
+        print(f"  Replay buffer per class: {replay_buffer_q.counts_per_class()}")
+        print(f"  Replay buffer cap per class: {replay_buffer_q._cap}")
                 
         
         # 4) Create teacher snapshot over the previous classes for DDR/KD
@@ -238,10 +265,10 @@ def main():
         for epoch in range(cfg['CIL_epochs']):
             # Ensure frozen
             cil_model.head.train()
-            cil_model.backbone.eval()
-            for m in cil_model.backbone.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.eval() # no longer freezing running stats
+            # cil_model.backbone.eval()
+            # for m in cil_model.backbone.modules():
+            #     if isinstance(m, nn.BatchNorm2d):
+            #         m.eval() # no longer freezing running stats
             
             # Learning rate scheduling
             if epoch == 5:
