@@ -9,10 +9,10 @@ torch.backends.quantized.engine = 'qnnpack'
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from process_dog_data import process_dog_data
-from utils import load_config, set_seed, ClassRegistry
+from utils import load_config, set_seed, ClassRegistry, build_tensors
 from metrics import profile_tinyml_cil, pretty_print_tinyml_report
-from models.cnn import TunedMCUCILCNN_M3
-from cnn_backbone_training_utils import load_data_cnn_backbone, eval_new_classes_on_backbone, quantise_frozen_backbone, features_quantized, compute_perchannel_scales
+from models.cnn import TunedMCUStudentCNN_CIL
+from cnn_backbone_training_utils import load_data_cnn_backbone, eval_on_fixed_gids, quantise_frozen_backbone, features_quantized, compute_perchannel_scales
 from cnn_CIL_training_utils import seen_and_new, load_CIL_data, CIL_post_task_eval, train_with_simplified_tdm, make_CIL_plots
 from replay import BalancedQuantReplayDynamic
 import json
@@ -32,7 +32,7 @@ def build_seen_df(full_df: pd.DataFrame, seen_gids: list[int]) -> pd.DataFrame:
     return gid_to_local, df, torch.tensor(local_to_gid, dtype=torch.long)
 
 def main():
-    """Main function - exact same logic as dog_tdm.py but with intelligent sampling."""
+    """Main function"""
     # Set fixed random seeds for reproducibility
     # gids = global dog ids (see index files for definitions)
     
@@ -77,7 +77,7 @@ def main():
     
     # Create backbone model with tuned MCU architecture
     backbone_num_classes = len(backbone_gids)
-    backbone_model = TunedMCUCILCNN_M3(3, backbone_num_classes, device, cfg['sparsity_ratio'], student_meta['feature_dim'])
+    backbone_model = TunedMCUStudentCNN_CIL(3, backbone_num_classes, device, cfg['sparsity_ratio'], student_meta['feature_dim'])
     backbone_model.to(device)
     
     # Load trained student weights
@@ -90,7 +90,7 @@ def main():
     print(f"Successfully loaded student model!")
     print(f"Student was trained on {len(student_meta['backbone_gids'])} classes")
     print(f"Student backbone_gids: {student_meta['backbone_gids']}")
-    print(f"Current backbone_gids: {backbone_gids}")
+    print(f"Current backbone_gids: {sorted(backbone_gids)}")
     
     # Load data for evaluation (we still need this for transforms and evaluation)
     backbone_data = load_data_cnn_backbone(cfg, backbone_gids, full_df)
@@ -109,34 +109,38 @@ def main():
         p.requires_grad = False
     
     # Create CIL model
-    cil_model = TunedMCUCILCNN_M3(3, backbone_num_classes, device, cfg['sparsity_ratio'], student_meta['feature_dim']).to(device)
+    cil_model = TunedMCUStudentCNN_CIL(3, backbone_num_classes, device, cfg['backbone_sparsity_ratio'], student_meta['feature_dim']).to(device)
     cil_model.backbone.load_state_dict(backbone_model.backbone.state_dict())
     cil_model.proj.load_state_dict(backbone_model.proj.state_dict())   # have to load proj also
 
     
-    # QUANTISATION
-    
+    #----------------------------------------------------- QUANTISATION
     # calibration (using training transforms)
     max_calib = 1024
     calib_imgs = backbone_data.X_train[:min(max_calib, len(backbone_data.X_train))]
-
+    # ensure eval + no grad
+    cil_model.eval()
+    for m in cil_model.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.eval()  # lock BN stats during calib
+    
     calib_loader = DataLoader(
         TensorDataset(calib_imgs, torch.zeros(len(calib_imgs))),
         batch_size=32,
         shuffle=False
     )
-    #TODO: check transforms 
     
     # build INT8 CPU backbone
-    qb_int8 = quantise_frozen_backbone(cil_model.backbone, calib_loader)
+    with torch.no_grad():
+        qb_int8 = quantise_frozen_backbone(cil_model.backbone, calib_loader)
+    with torch.no_grad():
+        # switch model’s feature path to the quantized one (CPU float out)
+        cil_model.quant_backbone = qb_int8           # lives on CPU
+        cil_model.backbone = nn.Identity()  # ensure I'm only using int8
 
-    # switch model’s feature path to the quantized one (CPU float out)
-    cil_model.quant_backbone = qb_int8           # lives on CPU
-    cil_model.backbone = nn.Identity()  # ensure I'm only using int8
-
-    cil_model._features = types.MethodType(features_quantized, cil_model)
-    # compute per-channel scales once
-    scales = compute_perchannel_scales(calib_loader, cil_model, pct=99.9)   
+        cil_model._features = types.MethodType(features_quantized, cil_model)
+        # compute per-channel scales once
+        scales = compute_perchannel_scales(calib_loader, cil_model, pct=99.9)   
 
     for p in cil_model.proj.parameters():
         p.requires_grad = False
@@ -145,10 +149,11 @@ def main():
     #--------------------------------------- STEP 3: SET UP CIL SCENARIO
     ##################################################################################################################### 
         
-    # Create evaluation classifier for all 7 classes
+    # Create evaluation classifier for all seen classes
     backbone_registry = ClassRegistry(gid2name=gid2breed)
     backbone_registry.add_gids(backbone_gids) 
-    
+
+        
     # Initialize replay buffer with known feat_dim and set scales
     with torch.no_grad():
         dummy = torch.zeros(1, 3, cfg['img_size'], cfg['img_size'])
@@ -173,9 +178,68 @@ def main():
     #--------------------------------------- STEP 4: PERFORM CIL SCENARIO
     #####################################################################################################################
     
+        
+    #------------------- Create evaluation for all 13 classes ------------------- 
+    target_13_gids = sorted(set(backbone_gids + [g for task in schedule for g in task]))[:13]
+    eval13_gid_to_local = {g:i for i,g in enumerate(target_13_gids)}
+    eval13_df = full_df[full_df["gid"].isin(target_13_gids)].copy()
+    eval13_df["local"] = [eval13_gid_to_local[int(g)] for g in eval13_df["gid"].tolist()]
+    X_eval13, y_eval13 = build_tensors(eval13_df[eval13_df["split"]=="test"], backbone_data.val_tf)
+    eval13_loader = DataLoader(TensorDataset(X_eval13, y_eval13),
+                            batch_size=cfg['CIL_batch_size_test'], shuffle=False)
+    #----------------------------------------------------------------------------  
     
-    # metrics !
+    seen_pre_hist=[]
+    seen_post_hist = []
+    fixed13_hist = []
+    
+    
+        
+    #put this below in a func later
+    # Build a "seen-only" dataset consisting of just backbone classes (Task 0)
+    gid_to_local_0, seen_df_0, local_to_gid_0 = build_seen_df(full_df, backbone_gids)
+    Xtr0, ytr0, Xte0, yte0 = load_CIL_data(seen_df_0, backbone_data.CIL_train_tf, backbone_data.val_tf, gid2breed, local_to_gid_0)
 
+    test_loader0 = DataLoader(
+        TensorDataset(Xte0, yte0),
+        batch_size=cfg['CIL_batch_size_test'],
+        shuffle=False
+    )
+
+    # Evaluate with the frozen backbone+proj + current head (this is your "cold" baseline)
+    cil_model.eval()
+    class_acc_local_0, overall_0 = CIL_post_task_eval(
+        test_loader0, device, cil_model, registry, local_to_gid_0, gid2breed
+    )
+
+    # Log as a PRE point for Task 0 (you can also log POST the same since nothing was trained yet)
+    seen_pre_hist.append({
+        "stage": "Task 0 (Backbone)",
+        "per_class": class_acc_local_0,     # dict: local_idx -> acc
+        "local_to_gid": local_to_gid_0.cpu()
+    })
+    seen_post_hist.append({
+        "stage": "Task 0 (Backbone)",
+        "per_class": class_acc_local_0,
+        "local_to_gid": local_to_gid_0.cpu()
+    })
+    # If you’re doing fixed-13 reporting, log that too for Task 0:
+    overall13_0, per13_0 = eval_on_fixed_gids(
+        model=cil_model,
+        loader=eval13_loader,
+        registry = registry,
+        fixed_gids=target_13_gids,
+        device=device
+    )
+    
+    fixed13_hist.append({
+        "stage": "Task 0 (Backbone)",
+        "overall": overall13_0,
+        "per_class": per13_0
+})
+    #put this above in a func later
+
+     
     #---------------------------- CIL PRE TASK PIPELINE (TASK NUMBER LEVEL)
     for task_idx, _task_gids in enumerate(schedule):        
         
@@ -197,27 +261,33 @@ def main():
             TensorDataset(X_test, y_test),
             batch_size=cfg['CIL_batch_size_test'], shuffle=False
         )
-        #------ Cold evaluation on backbone
-        cold_overall, cold_per_class = eval_new_classes_on_backbone(backbone_model,
-                                                                    task_train_loader, task_test_loader,
-                                                                    device, len(seen_plus_backbone))
-                                                                
-        print(f"[Pre-Task Eval] Overall Untrained Backbone Accuracy: {cold_overall:.1f}%")
-        #TODO: potentially change this to update model each task!
-        local = gid_to_local[new_gids[0]]
-        for local_idx, acc in cold_per_class.items():
-            if local_idx == local:
-                print(f"Pre-training backbone accuracy on newly added {new_task_breeds}: {acc:.1f}%")
-        
-        if task_idx == 0:
-            backbone_class_acc = cold_per_class
-        
+   
         # 2) Expand head for new classes
         prev_num = registry.num_classes()
         if len(new_gids) > 0:
             registry.add_gids(new_gids)
             cil_model.head.expand(len(new_gids))
         
+        # 3) PRE-TASK cold eval (seen classes only)
+        cil_model.eval()
+        class_acc_local_cold, overall_acc_cold = CIL_post_task_eval(
+            task_test_loader, device, cil_model, registry, task_local_to_gid, gid2breed
+        )
+        print(f"[Seen-only PRE] overall: {overall_acc_cold:.1f}%")
+        for cls, acc in class_acc_local_cold.items():
+                gid = int(task_local_to_gid[cls].item())
+                name = gid2breed[str(gid)]
+                print(f"  {cls} ({name}): {acc:.1f}%")
+        seen_pre_hist.append({
+            "stage": f"Task {task_idx+1}",
+            "per_class": class_acc_local_cold,   # dict local->acc
+            "local_to_gid": task_local_to_gid.cpu(),  # LongTensor
+        })
+        
+    
+        if task_idx == 0:
+            backbone_class_acc = overall_acc_cold
+                
         if task_idx == 0:
             # # Measure Sizing! 
                 
@@ -235,7 +305,7 @@ def main():
             
             pretty_print_tinyml_report(report)
                
-        # 3) Inter-task expansion (warm up grow before epochs)
+        # 4) Inter-task expansion (warm up grow before epochs)
         if task_idx > 0:
             cil_model.head.update_mask_inter(p = p_inter)
             
@@ -249,7 +319,7 @@ def main():
         print(f"  Replay buffer cap per class: {replay_buffer_q._cap}")
                 
         
-        # 4) Create teacher snapshot over the previous classes for DDR/KD
+        # 5) Create teacher snapshot over the previous classes for DDR/KD
         teacher = None  
         if prev_num > 0:  
             teacher = nn.Linear(cil_model.head.in_dim, prev_num, bias=True).to(device)
@@ -261,6 +331,7 @@ def main():
         optimizer = torch.optim.Adam(cil_model.head.parameters(), lr=cfg['CIL_learning_rate'])
         criterion = nn.CrossEntropyLoss()
         
+        # 6) Train current task
         #---------------------------- CIL DURING TASK PIPELINE (EPOCH NUMBER LEVEL)
         for epoch in range(cfg['CIL_epochs']):
             # Ensure frozen
@@ -295,26 +366,46 @@ def main():
                 task_idx=task_idx, epoch=epoch, gid2breed=gid2breed
             )
         #---------------------------- CIL POST TASK PIPELINE (TASK NUMBER LEVEL)
-        # Evaluate on all *seen* classes (no future classes!)
         
+        # note task_classes = seen_classes --> classes up through the finished task 
         cil_model.eval()
 
-        # note task_classes = seen_classes --> classes up through the finished task
-        class_acc_local, overall_acc = CIL_post_task_eval(
-            task_test_loader, device, cil_model, registry, task_local_to_gid, gid2breed
-        )
-        accuracy_history.append(class_acc_local.copy())
+        # 7) POST-TASK eval (seen-only) — comparable to (#3)
+        class_acc_local_post, overall_acc_post = CIL_post_task_eval(
+            task_test_loader, device, cil_model, registry, task_local_to_gid, gid2breed)
+        print(f"[Seen-only POST] overall: {overall_acc_post:.1f}%")
+        accuracy_history.append(class_acc_local_post.copy())
+        seen_post_hist.append({
+            "stage": f"Task {task_idx+1}",
+            "per_class": class_acc_local_post,   # dict local->acc
+            "local_to_gid": task_local_to_gid.cpu(),
+        })
         
+        # 8) evaluation on all classes (inlcuding future ones)
+        fixed13_overall, fixed13_per = eval_on_fixed_gids(
+            model=cil_model,
+            loader=eval13_loader,               # labels 0..12 map to target_13_gids order
+            registry=registry,            # IMPORTANT: same registry the head uses
+            fixed_gids=target_13_gids,         # fixed label set (length 13)
+            device=device
+        )
+        print(f"[Fixed-13 Eval] Overall: {fixed13_overall:.1f}%")
+        fixed13_hist.append({
+            "stage": f"Task {task_idx+1}",
+            "overall": fixed13_overall,
+            "per_class": fixed13_per,   # dict 0..12 -> acc
+        })
+                
         if task_idx + 1 == len(schedule):
-            for cls, acc in class_acc_local.items():
+            for cls, acc in class_acc_local_post.items():
                 gid = int(task_local_to_gid[cls].item())
                 name = gid2breed[str(gid)]
                 print(f"  {cls} ({name}): {acc:.1f}%")
-            print("Final overall accuracy:", overall_acc)
+            print("Final overall accuracy:", overall_acc_post)
             
         else:
-            print("Overall Accuracy so far:", overall_acc)
-            for cls, acc in class_acc_local.items():
+            print("Overall Accuracy so far:", overall_acc_post)
+            for cls, acc in class_acc_local_post.items():
                 gid = int(task_local_to_gid[cls].item())
                 name = gid2breed[str(gid)]
                 print(f" local id: {cls}, gid: {gid}, breed: ({name}): {acc:.1f}%")
@@ -325,15 +416,12 @@ def main():
     # Save results
     results = {
         'accuracy_history': accuracy_history,
-        'final_accuracy': overall_acc,
-        'final_class_acc': class_acc_local
+        'final_accuracy': overall_acc_post,
+        'final_class_acc': class_acc_local_post
     }
     
-    
     # Call plotting function 
-    make_CIL_plots(cfg, backbone_class_acc, accuracy_history)
-    
-
+    make_CIL_plots(cfg, gid2breed, seen_pre_hist, seen_post_hist, fixed13_hist, target_13_gids)
     
 if __name__ == "__main__":
     main()

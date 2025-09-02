@@ -75,7 +75,7 @@ class TunedMCUStudentCNN(nn.Module):
         return logits, z  # Return both logits and projected features for distillation
 
 
-class TunedMCUCILCNN_M3(nn.Module):
+class TunedMCUStudentCNN_CIL(nn.Module):
     """
     CIL-compatible wrapper around the TunedMCUStudentCNN.
     - Keeps your pipeline API (backbone/proj/head + helper forwards)

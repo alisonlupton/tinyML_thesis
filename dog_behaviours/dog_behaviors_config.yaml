@@ -47,6 +47,8 @@ backbone_weight_decay: 0.0001
 backbone_epochs: 50
 backbone_batch_size_train: 32
 backbone_batch_size_val: 32
+backbone_sparsity_ratio: 0.0
+
 
 # CIL training
 buffer_size: 5000

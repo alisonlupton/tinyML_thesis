@@ -5,7 +5,7 @@ cleaned_data_path_json: "../data/dog_breed_data/stanford_dogs_index.json"
 tasks_dir: "../data/dog_breed_data/tasks"
 
 # Image
-img_size: 160 # can also try 192
+img_size: 160 
 use_bbox: false # can put to true and say I will crop offline
 feat_dim: 128
 
@@ -16,10 +16,11 @@ num_cil_dogs_per_task: 1 # can add more to make harder
 num_tasks: 3 # can add more to make harder
 
 # Distillation done offline
+backbone_sparsity_ratio: 0.0
 
 # CIL training
-student_path: "../data/dog_breed_data/distillation_2/tuned_mcu_student.pth"
-student_meta_path: "../data/dog_breed_data/distillation_2/tuned_mcu_student_meta.json"
+student_path: "../data/dog_breed_data/distillation_2/tuned_mcu_student_73.11.pth"
+student_meta_path: "../data/dog_breed_data/distillation_2/student_meta.json"
 buffer_size: 3000
 sparsity_ratio: 0.3
 CIL_batch_size_train: 1
@@ -30,7 +31,7 @@ CIL_learning_rate: 0.001
 ddr_kd_weight: 0.5
 p_intra: 0.02
 p_inter: 0.05
-delta_k: 42
+delta_k: 2
 cwi_alpha: 1.0
 cwi_beta: 1.0
 cwi_ema: 0.9 # optional, not in SparCL

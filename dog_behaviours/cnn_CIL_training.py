@@ -60,7 +60,7 @@ def main():
     backbone_num_classes = len(backbone_behaviors)
     C = len(dog_data[list(dog_data.keys())[0]]['sensor_cols'])
     L = int(dog_data[list(dog_data.keys())[0]]['window_len'])
-    backbone_model = SimplifiedTDMModelCNN(C, backbone_num_classes, device, sparsity_ratio=0.3)
+    backbone_model = SimplifiedTDMModelCNN(C, backbone_num_classes, device, sparsity_ratio=cfg['backbone_sparsity_ratio'])
     backbone_model.to(device)
     
     # Prepare backbone training data 
@@ -286,7 +286,7 @@ def main():
                                     replay_buffer_q, seen_gids.tolist(), seen_names, task_idx, epoch)
             
             # Add training metrics to plotter
-            task_name = cil_tasks[task_idx] if task_idx < len(cil_tasks) else f"Task_{task_idx+1}"
+            task_name = f"Task {task_idx+1}: {new_class}"
             plotter.add_cil_task_training_epoch(task_name, epoch, train_loss, train_acc)
 
         #---------------------------- CIL POST TASK PIPELINE (TASK NUMBER LEVEL)
@@ -297,10 +297,15 @@ def main():
         
         # note task_classes = seen_classes --> classes up through the finished task
         class_acc, overall_acc = CIL_post_task_eval(task_classes, test_loader, device, all_behaviors, cil_model, registry)
-        accuracy_history.append(class_acc.copy())
+        
+        # Store both class accuracies and overall accuracy for proper weighted calculation
+        accuracy_history.append({
+            'class_acc': class_acc.copy(),
+            'overall_acc': overall_acc
+        })
         
         # Add to plotter
-        task_name = cil_tasks[task_idx] if task_idx < len(cil_tasks) else f"Task_{task_idx+1}"
+        task_name = f"Task {task_idx+1}: {new_class}"
         plotter.add_cil_task(task_name, class_acc, overall_acc)
         
         if task_idx + 1 == len(cil_tasks):
@@ -335,10 +340,10 @@ def main():
     # plotter.plot_cil_progression()
     
     # Plot CIL training curves (new)
-    # plotter.plot_cil_training_curves()
+    plotter.plot_cil_training_curves()
     
     # Plot CIL training summary (new)
-    plotter.plot_cil_training_summary()
+    # plotter.plot_cil_training_summary()
     
     # Plot final class comparison
     # plotter.plot_final_comparison()
@@ -347,7 +352,7 @@ def main():
     # plotter.save_metrics()
     
     # Create summary report
-    plotter.create_summary_report()
+    # plotter.create_summary_report()
     
     # Call original plotting function as well
     make_CIL_plots(cfg, backbone_class_acc, accuracy_history)

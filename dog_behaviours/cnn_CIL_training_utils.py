@@ -238,9 +238,8 @@ def CIL_post_task_eval(seen_classes, test_loader, device, all_behaviors, model, 
     
 def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
     
-    # Set seaborn style
-    sns.set_style("whitegrid")
-    sns.set_palette("husl")
+    # Set seaborn style to match other plots
+    plt.style.use('seaborn-v0_8-deep')
     
     # Prepare data for plotting
     stages = ['Backbone'] + [f'Task {i+1}' for i in range(len(accuracy_history))]
@@ -251,7 +250,12 @@ def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
         if stage == 'Backbone':
             acc_dict = backbone_class_acc
         else:
-            acc_dict = accuracy_history[stage_idx - 1]
+            # Handle new data structure with both class_acc and overall_acc
+            if isinstance(accuracy_history[stage_idx - 1], dict):
+                acc_dict = accuracy_history[stage_idx - 1]['class_acc']
+            else:
+                # Backward compatibility for old format
+                acc_dict = accuracy_history[stage_idx - 1]
         
         for behavior, accuracy in acc_dict.items():
             plot_data.append({
@@ -280,20 +284,35 @@ def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
     
     # Add grid and customize legend
     plt.grid(True, alpha=0.3)
-    plt.legend(title='Behavior Classes', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.legend(title='Behavior Classes', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=12)
     
-    # Add value annotations on points
+    # Add value annotations on points with better positioning to avoid overlap
     for stage_idx, stage in enumerate(stages):
         if stage == 'Backbone':
             acc_dict = backbone_class_acc
         else:
-            acc_dict = accuracy_history[stage_idx - 1]
+            # Handle new data structure with both class_acc and overall_acc
+            if isinstance(accuracy_history[stage_idx - 1], dict):
+                acc_dict = accuracy_history[stage_idx - 1]['class_acc']
+            else:
+                # Backward compatibility for old format
+                acc_dict = accuracy_history[stage_idx - 1]
         
-        for behavior, accuracy in acc_dict.items():
-            plt.annotate(f'{accuracy:.1f}%', 
-                        xy=(stage_idx, accuracy), 
-                        xytext=(5, 5), textcoords='offset points',
-                        fontsize=8, alpha=0.7)
+        # Sort behaviors by accuracy to avoid text overlap
+        # Ensure acc_dict is a dictionary of {behavior: accuracy} pairs
+        if isinstance(acc_dict, dict):
+            sorted_behaviors = sorted(acc_dict.items(), key=lambda x: x[1], reverse=True)
+            
+            for i, (behavior, accuracy) in enumerate(sorted_behaviors):
+                # Offset text based on position to avoid overlap
+                y_offset = 10 if i % 2 == 0 else -15
+                x_offset = 5 if i % 2 == 0 else -5
+                
+                plt.annotate(f'{accuracy:.1f}%', 
+                            xy=(stage_idx, accuracy), 
+                            xytext=(x_offset, y_offset), textcoords='offset points',
+                            fontsize=10, fontweight='bold', alpha=0.8,
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
     
     # Adjust layout to prevent label cutoff
     plt.tight_layout()
@@ -309,10 +328,18 @@ def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
     overall_accuracies = []
     for stage_idx, stage in enumerate(stages):
         if stage == 'Backbone':
+            # For backbone, we need to calculate from class accuracies
+            # Since we don't have sample counts, use simple average as fallback
             acc_dict = backbone_class_acc
+            overall_acc = sum(acc_dict.values()) / len(acc_dict)
         else:
-            acc_dict = accuracy_history[stage_idx - 1]
-        overall_acc = sum(acc_dict.values()) / len(acc_dict)
+            # Use the actual overall accuracy from evaluation
+            if isinstance(accuracy_history[stage_idx - 1], dict):
+                overall_acc = accuracy_history[stage_idx - 1]['overall_acc']
+            else:
+                # Backward compatibility - fallback to simple average
+                acc_dict = accuracy_history[stage_idx - 1]
+                overall_acc = sum(acc_dict.values()) / len(acc_dict)
         overall_accuracies.append(overall_acc)
     
     # Plot overall accuracy

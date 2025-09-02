@@ -187,79 +187,177 @@ def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid, gid2b
 
         overall_acc = 100.0 * correct / max(total, 1)
         class_acc = {int(c): (100.0 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0.0) for c in range(num_local)}
+        # Debugging 
+        print(f"[Debug] totals per class: {class_total}")
         
         return class_acc, overall_acc
     
-def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
-    
-    # Set seaborn style
+import os
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+def _ensure_dir(d):
+    os.makedirs(d, exist_ok=True)
+
+def _seen_history_to_df(hist, gid2breed):
+    """
+    hist: list of {"stage": str, "per_class": {local_idx: acc}, "local_to_gid": LongTensor}
+    Returns tidy DF with columns: Stage, gid, ClassName, Accuracy
+    (local indices are converted to global gid using local_to_gid for that stage)
+    """
+    rows = []
+    for entry in hist:
+        stage = entry["stage"]
+        per_class = entry["per_class"]
+        l2g = entry["local_to_gid"].tolist()  # local idx -> gid (list)
+        for local_idx, acc in per_class.items():
+            gid = int(l2g[int(local_idx)])
+            cname = gid2breed.get(str(gid), f"gid_{gid}")
+            rows.append({"Stage": stage, "gid": gid, "ClassName": cname, "Accuracy": float(acc)})
+    if not rows:
+        return pd.DataFrame(columns=["Stage","gid","ClassName","Accuracy"])
+    # keep stage order numeric
+    df = pd.DataFrame(rows)
+    df["StageIdx"] = df["Stage"].str.extract(r"(\d+)").fillna(0).astype(int)
+    df = df.sort_values(["StageIdx", "ClassName"]).drop(columns=["StageIdx"])
+    return df
+
+def _fixed13_to_df(hist, target_13_gids, gid2breed):
+    """
+    hist: list of {"stage": str, "overall": float, "per_class": {0..12: acc}}
+    target_13_gids: list of gids in the same order used to build eval13 tensors
+    Returns two DFs:
+      - df_overall: Stage, Overall
+      - df_pc: Stage, gid, ClassName, Accuracy
+    """
+    rows_overall, rows_pc = [], []
+    for entry in hist:
+        stage = entry["stage"]
+        rows_overall.append({"Stage": stage, "Overall": float(entry.get("overall", np.nan))})
+        pc = entry.get("per_class", {})
+        for i, gid in enumerate(target_13_gids):
+            acc = float(pc.get(i, np.nan))
+            cname = gid2breed.get(str(int(gid)), f"gid_{int(gid)}")
+            rows_pc.append({"Stage": stage, "gid": int(gid), "ClassName": cname, "Accuracy": acc})
+    df_overall = pd.DataFrame(rows_overall) if rows_overall else pd.DataFrame(columns=["Stage","Overall"])
+    df_pc = pd.DataFrame(rows_pc) if rows_pc else pd.DataFrame(columns=["Stage","gid","ClassName","Accuracy"])
+    # stage order
+    if not df_overall.empty:
+        df_overall["StageIdx"] = df_overall["Stage"].str.extract(r"(\d+)").fillna(0).astype(int)
+        df_overall = df_overall.sort_values("StageIdx").drop(columns=["StageIdx"])
+    if not df_pc.empty:
+        df_pc["StageIdx"] = df_pc["Stage"].str.extract(r"(\d+)").fillna(0).astype(int)
+        df_pc = df_pc.sort_values(["StageIdx","ClassName"]).drop(columns=["StageIdx"])
+    return df_overall, df_pc
+
+def make_CIL_plots(
+    cfg,
+    gid2breed,
+    seen_pre_hist,          # list of dicts: {"stage","per_class","local_to_gid"}
+    seen_post_hist,         # list of dicts: {"stage","per_class","local_to_gid"}
+    fixed13_hist,           # list of dicts: {"stage","overall","per_class"}
+    target_13_gids,         # list[int] (order used in eval13 tensors)
+    highlight_new_class=None # optional: list of gid just added per stage (same length as seen_*_hist)
+):
     sns.set_style("whitegrid")
     sns.set_palette("husl")
-    
-    # Prepare data for plotting
-    stages = ['Backbone'] + [f'Task {i+1}' for i in range(len(accuracy_history))]
-    
-    # Create DataFrame for seaborn
-    plot_data = []
-    for stage_idx, stage in enumerate(stages):
-        if stage == 'Backbone':
-            acc_dict = backbone_class_acc
-        else:
-            acc_dict = accuracy_history[stage_idx - 1]
-        
-        for c, accuracy in acc_dict.items():
-            plot_data.append({
-                'Stage': stage,
-                'Class': str(c),
-                'Accuracy': accuracy
-            })
-    
-    df = pd.DataFrame(plot_data)
-    
-    # Create the main plot
-    plt.figure(figsize=(14, 8))
-    
-    # Plot per-class accuracy progression
-        # Per-class accuracy progression
-    plt.figure(figsize=(14, 8))
-    ax = sns.lineplot(data=df, x='Stage', y='Accuracy', hue='Class',
-                      marker='o', linewidth=2.5, markersize=8)
-    plt.title('Per-Class Accuracy Progression: Backbone → CIL Tasks',
-              fontsize=16, fontweight='bold', pad=20)
-    plt.xlabel('Training Stage', fontsize=12, fontweight='bold')
-    plt.ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
-    plt.xticks(rotation=45)
-    plt.grid(True, alpha=0.3)
-    plt.legend(title='Class', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plot_dir = cfg['plot_dir']
-    plt.savefig(f'{plot_dir}/dog_breed_per_class_progression.png', dpi=300, bbox_inches='tight')
+    plot_dir = cfg["plot_dir"]
+    _ensure_dir(plot_dir)
 
-    # Overall accuracy progression
-    plt.figure(figsize=(10, 6))
-    overall_accuracies = []
-    for stage_idx, stage in enumerate(stages):
-        if stage == 'Backbone':
-            acc_dict = backbone_class_acc
-        else:
-            acc_dict = accuracy_history[stage_idx - 1]
-        overall_acc = sum(acc_dict.values()) / max(1, len(acc_dict))
-        overall_accuracies.append(overall_acc)
+    # ---------- Build tidy frames ----------
+    df_seen_pre  = _seen_history_to_df(seen_pre_hist,  gid2breed)
+    df_seen_post = _seen_history_to_df(seen_post_hist, gid2breed)
+    df13_overall, df13_pc = _fixed13_to_df(fixed13_hist, target_13_gids, gid2breed)
 
-    ax = sns.lineplot(x=stages, y=overall_accuracies, marker='o', linewidth=3, markersize=10)
-    plt.title('Overall Accuracy Progression: Backbone → CIL Tasks',
-              fontsize=16, fontweight='bold', pad=20)
-    plt.xlabel('Training Stage', fontsize=12, fontweight='bold')
-    plt.ylabel('Overall Accuracy (%)', fontsize=12, fontweight='bold')
-    plt.xticks(rotation=45)
-    plt.grid(True, alpha=0.3)
-    plt.ylim(0, 100)
-    for i, (stage, acc) in enumerate(zip(stages, overall_accuracies)):
-        plt.annotate(f'{acc:.1f}%', xy=(i, acc), xytext=(0, 10), textcoords='offset points',
-                     ha='center', fontsize=12, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(f'{plot_dir}/dog_breed_overall_progression.png', dpi=300, bbox_inches='tight')
+    # ---------- (1) Seen-only overall: PRE vs POST ----------
+    def _agg_overall(df):
+        if df.empty: return pd.DataFrame(columns=["Stage","Overall"])
+        tmp = df.groupby("Stage", as_index=False)["Accuracy"].mean().rename(columns={"Accuracy":"Overall"})
+        tmp["Kind"] = ""  # will set later
+        return tmp
 
-    print(f"\nResults saved to:")
-    print(f"  - {plot_dir}/dog_breed_per_class_progression.png")
-    print(f"  - {plot_dir}/dog_breed_overall_progression.png")
+    pre_overall  = _agg_overall(df_seen_pre);  pre_overall["Kind"]  = "Seen PRE"
+    post_overall = _agg_overall(df_seen_post); post_overall["Kind"] = "Seen POST"
+    df_seen_overall = pd.concat([pre_overall, post_overall], ignore_index=True)
+
+    if not df_seen_overall.empty:
+        plt.figure(figsize=(10,6))
+        sns.lineplot(data=df_seen_overall, x="Stage", y="Overall", hue="Kind", marker="o")
+        plt.title("Seen-only Overall Accuracy (PRE vs POST)", fontsize=15)
+        plt.ylabel("Accuracy (%)"); plt.xlabel("Stage"); plt.ylim(0, 100); plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(f"{plot_dir}/seen_overall_pre_vs_post.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+    # ---------- (2) Seen-only per-class spaghetti (POST by default; overlay PRE faint if you want) ----------
+    if not df_seen_post.empty:
+        plt.figure(figsize=(14,8))
+        # POST solid
+        ax = sns.lineplot(data=df_seen_post, x="Stage", y="Accuracy", hue="ClassName",
+                          marker="o", linewidth=2.2, legend=False)
+        # Optionally overlay PRE as faint dashed
+        if not df_seen_pre.empty:
+            sns.lineplot(data=df_seen_pre, x="Stage", y="Accuracy", hue="ClassName",
+                         marker="o", linewidth=1.0, style=True, dashes=True, alpha=0.35, legend=False)
+        plt.title("Seen-only Per-Class Accuracy (POST; PRE dashed)", fontsize=15)
+        plt.ylabel("Accuracy (%)"); plt.xlabel("Stage"); plt.ylim(0, 100); plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(f"{plot_dir}/seen_per_class_spaghetti.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+    # ---------- (3) New class PRE→POST bars per task ----------
+    # If you pass highlight_new_class = list of gids (one per task), we’ll draw bars
+    if highlight_new_class and len(highlight_new_class) == len(seen_pre_hist) == len(seen_post_hist):
+        rows = []
+        for i, gid in enumerate(highlight_new_class):
+            stage = seen_pre_hist[i]["stage"]
+            # find name
+            cname = gid2breed.get(str(int(gid)), f"gid_{int(gid)}")
+            # map gid to local for that stage
+            l2g = seen_pre_hist[i]["local_to_gid"].tolist()
+            # inverse map: gid -> local
+            inv = {int(g): li for li, g in enumerate(l2g)}
+            if int(gid) not in inv:
+                continue
+            li = inv[int(gid)]
+            pre_acc  = float(seen_pre_hist[i]["per_class"].get(li, np.nan))
+            post_acc = float(seen_post_hist[i]["per_class"].get(li, np.nan))
+            rows.append({"Stage": stage, "ClassName": cname, "Kind": "PRE",  "Accuracy": pre_acc})
+            rows.append({"Stage": stage, "ClassName": cname, "Kind": "POST", "Accuracy": post_acc})
+        df_new = pd.DataFrame(rows)
+        if not df_new.empty:
+            plt.figure(figsize=(12,6))
+            sns.barplot(data=df_new, x="Stage", y="Accuracy", hue="Kind")
+            for i, txt in enumerate(df_new["ClassName"].unique()):
+                plt.text(i, 99, txt, ha="center", va="top", fontsize=9, alpha=0.8, rotation=45)
+            plt.title("New Class Improvement per Task (PRE → POST)", fontsize=15)
+            plt.ylim(0, 100); plt.ylabel("Accuracy (%)"); plt.xlabel("Stage"); plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(f"{plot_dir}/new_class_pre_post_bars.png", dpi=300, bbox_inches="tight")
+            plt.close()
+
+    # ---------- (4) Fixed-13 overall trend ----------
+    if not df13_overall.empty:
+        plt.figure(figsize=(10,6))
+        sns.lineplot(data=df13_overall, x="Stage", y="Overall", marker="o")
+        plt.title("Fixed-13 Overall Accuracy", fontsize=15)
+        plt.ylabel("Accuracy (%)"); plt.xlabel("Stage"); plt.ylim(0, 100); plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(f"{plot_dir}/fixed13_overall.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+    # ---------- (5) Fixed-13 per-class heatmap ----------
+    if not df13_pc.empty:
+        # pivot Stage x ClassName
+        pivot = df13_pc.pivot_table(index="ClassName", columns="Stage", values="Accuracy", aggfunc="mean")
+        plt.figure(figsize=(1.2*len(pivot.columns)+4, 0.38*len(pivot.index)+3))
+        sns.heatmap(pivot, annot=False, vmin=0, vmax=100, cmap="viridis", cbar_kws={"label": "Acc (%)"})
+        plt.title("Fixed-13 Per-Class Accuracy (Heatmap)", fontsize=15)
+        plt.xlabel("Stage"); plt.ylabel("Class")
+        plt.tight_layout()
+        plt.savefig(f"{plot_dir}/fixed13_per_class_heatmap.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+    print("\nSaved plots to:", os.path.abspath(plot_dir))

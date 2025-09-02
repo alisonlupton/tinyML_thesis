@@ -57,7 +57,7 @@ class ClassRegistry:
         # row index -> gid (by position)
         self.gid_for_row: list[int] = []
         # optional name mapping for convenience/printing
-        self.gid2name = {int(k): v for k, v in (gid2name or {}).items()}
+        self.gid2name = {int(k): v for k, v in (gid2name or {}).items()}   
 
     # ---- add / query ----
     def add_gids(self, gids: list[int]):
@@ -84,6 +84,17 @@ class ClassRegistry:
     def rows_for_all_known(self) -> list[int]:
         """Return [0..num_classes-1]."""
         return list(range(len(self.gid_for_row)))
+    def gather_rows_for_eval_fixed(self, fixed_gids: list[int]) -> list[int]:
+        """
+        For a fixed ordered list of global IDs (e.g., your 13-dog eval set),
+        return a same-length list of row indices into the current head.
+        Unseen classes return -1.
+        """
+        rows = []
+        for g in fixed_gids:
+            g = int(g)
+            rows.append(self.row_for_gid.get(g, -1))
+        return rows
 
     # ---- optional convenience for names ----
     def name_for_gid(self, gid: int) -> str:
@@ -125,7 +136,8 @@ def eval_over_seen(model, loader, registry: ClassRegistry, local_to_gid: torch.L
     for xb, y_local in loader:
         xb, y_local = xb.to(device), y_local.to(device)
         feats = model._features(xb)
-        logits = model.head.forward_rows(feats, rows_seen)
+        z = model.proj(feats)
+        logits = model.head.forward_rows(z, rows_seen)
         pred = logits.argmax(1)
 
         total += y_local.size(0)

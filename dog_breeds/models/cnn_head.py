@@ -97,7 +97,6 @@ class SimplifiedTDMHead(nn.Module):
             out[:, known_mask] = logits_known
         return out
 
-
     def apply_mask(self):
         with torch.no_grad():
             self.linear.weight.mul_(self.mask)

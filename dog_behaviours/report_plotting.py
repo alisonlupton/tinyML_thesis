@@ -10,14 +10,16 @@ plt.style.use('seaborn-v0_8-deep')
 
 # Data from the intelligent_sampling_summary.txt
 behaviors = {
-    'Lying chest': {'samples': 11349, 'percentage': 18.5},
-    'Sitting': {'samples': 11266, 'percentage': 18.4},
-    'Standing': {'samples': 10424, 'percentage': 17.0},
-    'Sniffing': {'samples': 10393, 'percentage': 17.0},
-    'Walking': {'samples': 7991, 'percentage': 13.1},
-    'Trotting': {'samples': 7895, 'percentage': 12.9},
-    'Galloping': {'samples': 1885, 'percentage': 3.1}
+    'Lying chest': {'samples': 22529, 'percentage': 18.8},
+    'Sitting': {'samples': 22306, 'percentage': 18.6},
+    'Standing': {'samples': 20374, 'percentage': 17.0},
+    'Sniffing': {'samples': 20359, 'percentage': 17.0},
+    'Walking': {'samples': 15473, 'percentage': 12.9},
+    'Trotting': {'samples': 15298, 'percentage': 12.8},
+    'Galloping': {'samples': 3324, 'percentage': 2.8}
 }
+
+
 
 # Create DataFrame
 df = pd.DataFrame([
@@ -28,27 +30,14 @@ df = pd.DataFrame([
 # Sort by percentage for better visualization
 df = df.sort_values('Percentage', ascending=False)
 
-# Create figure with two subplots
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+# Create figure with single subplot for pie chart
+fig, ax = plt.subplots(1, 1, figsize=(10, 8))
 
-# Plot 1: Percentage distribution (pie chart)
+# Plot: Percentage distribution (pie chart)
 colors = sns.color_palette("deep", len(df))
-wedges, texts, autotexts = ax1.pie(df['Percentage'], labels=df['Behavior'], autopct='%1.1f%%', 
+wedges, texts, autotexts = ax.pie(df['Percentage'], labels=df['Behavior'], autopct='%1.1f%%', 
                                    colors=colors, startangle=90)
-ax1.set_title('Dog Behavior Distribution (Percentage)', fontsize=14, fontweight='bold', pad=20)
-
-# Plot 2: Sample count distribution (bar chart)
-bars = ax2.bar(df['Behavior'], df['Samples'], color=colors, alpha=0.8)
-ax2.set_title('Dog Behavior Distribution (Sample Count)', fontsize=14, fontweight='bold', pad=20)
-ax2.set_xlabel('Behavior', fontsize=12)
-ax2.set_ylabel('Number of Samples', fontsize=12)
-ax2.tick_params(axis='x', rotation=45)
-
-# Add value labels on bars
-for bar, sample_count in zip(bars, df['Samples']):
-    height = bar.get_height()
-    ax2.text(bar.get_x() + bar.get_width()/2., height + 100,
-             f'{sample_count:,}', ha='center', va='bottom', fontweight='bold')
+ax.set_title('Dog Behavior Distribution (Percentage)', fontsize=16, fontweight='bold', pad=20)
 
 # Adjust layout
 plt.tight_layout()
@@ -147,26 +136,27 @@ class CILTrainingPlotter:
             print("No backbone metrics to plot!")
             return
         
+        # Set seaborn style to match behavior distribution plots
+        plt.style.use('seaborn-v0_8-deep')
+        
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
         epochs = self.backbone_metrics['epochs']
         
-        # Plot 1: Loss curves
-        ax1.plot(epochs, self.backbone_metrics['train_loss'], 'b-', label='Training Loss', linewidth=2)
-        ax1.plot(epochs, self.backbone_metrics['val_loss'], 'r-', label='Validation Loss', linewidth=2)
-        ax1.set_xlabel('Epoch', fontsize=12)
-        ax1.set_ylabel('Loss', fontsize=12)
-        ax1.set_title('Backbone Training Loss', fontsize=14, fontweight='bold')
-        ax1.legend()
+        # Plot 1: Training Loss
+        ax1.plot(epochs, self.backbone_metrics['train_loss'], 'o-', linewidth=2.5, markersize=8, color='blue', label='Training Loss')
+        ax1.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Loss', fontsize=12, fontweight='bold')
+        ax1.set_title('Backbone Training Loss', fontsize=16, fontweight='bold', pad=20)
+        ax1.legend(fontsize=12)
         ax1.grid(True, alpha=0.3)
         
-        # Plot 2: Accuracy curves
-        ax2.plot(epochs, self.backbone_metrics['train_acc'], 'b-', label='Training Accuracy', linewidth=2)
-        ax2.plot(epochs, self.backbone_metrics['val_acc'], 'r-', label='Validation Accuracy', linewidth=2)
-        ax2.set_xlabel('Epoch', fontsize=12)
-        ax2.set_ylabel('Accuracy (%)', fontsize=12)
-        ax2.set_title('Backbone Training Accuracy', fontsize=14, fontweight='bold')
-        ax2.legend()
+        # Plot 2: Validation Accuracy
+        ax2.plot(epochs, self.backbone_metrics['val_acc'], 'o-', linewidth=2.5, markersize=8, color='red', label='Validation Accuracy')
+        ax2.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+        ax2.set_title('Backbone Validation Accuracy', fontsize=16, fontweight='bold', pad=20)
+        ax2.legend(fontsize=12)
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()

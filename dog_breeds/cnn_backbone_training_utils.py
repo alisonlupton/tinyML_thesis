@@ -3,11 +3,11 @@ import torch
 import copy
 import torch.nn as nn
 from dataclasses import dataclass
-from utils import build_tensors
+from utils import build_tensors, ClassRegistry
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from typing import Tuple, Dict, Optional
 from torch.ao.quantization import get_default_qconfig, fuse_modules, prepare, convert, QuantStub, DeQuantStub
+from torchvision.transforms import InterpolationMode as I
 
 
 @dataclass
@@ -25,20 +25,31 @@ class BackboneData:
     
     
 def _make_transforms(cfg):
+    img = cfg['img_size']
+    mean, std = cfg['mean_tf'], cfg['std_tf']  # from teacher meta
+
+    # === Inference / Validation (match offline "deploy_tf_strong") ===
     deploy_tf = transforms.Compose([
-    transforms.Resize((cfg['img_size'], cfg['img_size'])),   # match student + MCU
-    transforms.ToTensor(),
-    transforms.Normalize(cfg['mean_tf'], cfg['std_tf']),
-])
-    backbone_train_tf = deploy_tf
-    CIL_train_tf = transforms.Compose([
-        transforms.Resize((cfg['img_size'], cfg['img_size'])),
-        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.Resize(int(round(1.10*img)), interpolation=I.BILINEAR),  # e.g., 176 for 160
+        transforms.CenterCrop(img),                 # 160x160
         transforms.ToTensor(),
-        transforms.Normalize(cfg['mean_tf'], cfg['std_tf']),
+        transforms.Normalize(mean, std),
     ])
-    val_tf = deploy_tf
-    return backbone_train_tf, CIL_train_tf, val_tf
+    # === Backbone/distill/replay (no aug) ===
+    backbone_train_tf = deploy_tf
+    
+    
+    # === CIL on-device training (lite aug) ===
+    # Cheap: tiny translate via RandomCrop + optional flip
+    CIL_train_tf = transforms.Compose([
+        transforms.Resize(int(round(1.05*img)), interpolation=I.BILINEAR),  # smaller upsample than deploy to save a bit
+        transforms.RandomCrop(img),                 # cheap spatial jitter
+        transforms.RandomHorizontalFlip(p=0.5),     # essentially free
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    return backbone_train_tf, CIL_train_tf, deploy_tf
 
 def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     
@@ -53,7 +64,7 @@ def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     df_val  = backbone_df[backbone_df["split"]=="test"].copy()
 
 
-    backbone_train_tf, CIL_train_tf,  val_tf = _make_transforms(cfg)
+    backbone_train_tf, CIL_train_tf, val_tf = _make_transforms(cfg)
     
     X_train, y_train = build_tensors(df_train, backbone_train_tf)
     X_val, y_val = build_tensors(df_val, val_tf)
@@ -64,64 +75,65 @@ def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     return BackboneData(X_train, y_train, X_val, y_val, gid_to_local, local_ids, backbone_train_tf, CIL_train_tf, val_tf)
 
 @torch.no_grad()
-def eval_new_classes_on_backbone(model,
-    train_loader: DataLoader,
-    test_loader: DataLoader, 
-    device: torch.device, 
-    num_classes: Optional[int] = None,
-) -> Tuple[float, Dict[int, float]]:
+def eval_new_classes_on_backbone(
+    model,
+    train_loader,       # use deploy_tf here for fair comparison
+    test_loader,        # use deploy_tf here too
+    device,
+    num_classes=None,
+    use_proj=True,
+) -> tuple[float, dict[int, float]]:
     """
-    Evaluate a frozen backbone by building class prototypes from TRAIN features
-    and classifying TEST features by cosine similarity to those prototypes.
-
-    Assumes labels in loaders are *local* class indices [0..K-1] for the task.
-    Returns: (overall_acc_percent, per_class_acc_percent_dict)
+    Prototype (NCM) eval using the same feature stage as deployment.
+    For fair apples-to-apples, pass your quantized CIL model here and
+    use deterministic deploy transforms for both TRAIN (prototype build)
+    and TEST (classification).
     """
     model.eval()
 
-    # --------- 1) Build prototypes from TRAIN features ---------
-    feats_sums = {}
-    counts = {}
+    def feat_fn(x):
+        f = model._features(x)                  # (N, 160) — will be quantized path if you attached it
+        if use_proj and hasattr(model, "proj"):
+            f = model.proj(f)                   # (N, feat_dim); Dropout off in eval()
+        return torch.nn.functional.normalize(f, dim=1)
+
+    # --- Build prototypes on TRAIN (deterministic transforms) ---
+    sums, counts, D = {}, {}, None
     for xb, yb in train_loader:
         xb, yb = xb.to(device), yb.to(device)
-        z = model._features(xb)                       # (N, D)
-        z = torch.nn.functional.normalize(z, dim=1)   # cosine-ready
+        z = feat_fn(xb)
+        if D is None: D = z.shape[1]
         for c in yb.unique().tolist():
             c = int(c)
-            mask = (yb == c)
-            feats_sums[c] = feats_sums.get(c, 0) + z[mask].sum(dim=0)
-            counts[c] = counts.get(c, 0) + int(mask.sum().item())
+            m = (yb == c)
+            sums[c]   = sums.get(c, torch.zeros(D, device=device)) + z[m].sum(0)
+            counts[c] = counts.get(c, 0) + int(m.sum().item())
 
-    # If caller didn't pass num_classes, infer from what we saw
     if num_classes is None:
         num_classes = (max(counts.keys()) + 1) if counts else 0
+    if D is None:
+        return 0.0, {c: 0.0 for c in range(num_classes)}
 
-    # Build prototype matrix [K, D], missing classes get zero vector (ignored at test)
-    D = next(iter(feats_sums.values())).numel() if feats_sums else model.head.in_dim
     protos = torch.zeros(num_classes, D, device=device)
-    seen_mask = torch.zeros(num_classes, dtype=torch.bool, device=device)
-    for c, s in feats_sums.items():
+    seen = torch.zeros(num_classes, dtype=torch.bool, device=device)
+    for c, s in sums.items():
         if counts[c] > 0:
             protos[c] = s / counts[c]
-            seen_mask[c] = True
-    protos = torch.nn.functional.normalize(protos, dim=1)  # [K, D] unit vectors
+            seen[c] = True
+    protos = torch.nn.functional.normalize(protos, dim=1)
 
-    # --------- 2) Classify TEST features by cosine to prototypes ---------
-    total = 0
-    correct = 0
+    # --- Classify TEST by cosine to prototypes ---
+    total = correct = 0
     cls_tot = [0] * num_classes
     cls_cor = [0] * num_classes
 
     for xb, yb in test_loader:
         xb, yb = xb.to(device), yb.to(device)
-        z = model._features(xb)                        # [N, D]
-        z = torch.nn.functional.normalize(z, dim=1)    # unit
-        # cosine sim = dot product for normalized vectors
-        sims = z @ protos.t()                          # [N, K]
-        # For classes without a prototype, make them unselectable
-        if (~seen_mask).any():
-            sims[:, ~seen_mask] = -1e9
-        pred = sims.argmax(dim=1)
+        z = feat_fn(xb)
+        sims = z @ protos.t()
+        if (~seen).any():
+            sims[:, ~seen] = -1e9
+        pred = sims.argmax(1)
 
         total += yb.size(0)
         correct += (pred == yb).sum().item()
@@ -135,6 +147,74 @@ def eval_new_classes_on_backbone(model,
     overall = 100.0 * correct / max(1, total)
     per_class = {c: (100.0 * cls_cor[c] / cls_tot[c] if cls_tot[c] > 0 else 0.0)
                  for c in range(num_classes)}
+    return overall, per_class
+
+@torch.no_grad()
+
+def eval_on_fixed_gids(
+    model,
+    loader,                 # yields (xb, y_local) where y_local ∈ [0..len(fixed_gids)-1]
+    registry,               # ClassRegistry that *may* know only a subset of fixed_gids
+    fixed_gids,             # list[int] — global IDs in the same order used to build y_local
+    device,
+):
+    """
+    Evaluate with the TDM head on a fixed set of global IDs (gids), even if some
+    of them are unseen. For unseen gids, logits are set to -inf so they can’t win.
+    Returns: overall %, {gid: acc%}
+    """
+    model.eval()
+
+    # Map fixed gids -> current head rows (or -1 if unseen)
+    rows = []
+    known_cols = []   # columns (in fixed_gids order) that are known
+    for col, g in enumerate(fixed_gids):
+        if int(g) in registry.row_for_gid:
+            rows.append(registry.row_for_gid[int(g)])
+            known_cols.append(col)
+        else:
+            rows.append(-1)
+
+    total, correct = 0, 0
+    per_tot = {int(g): 0 for g in fixed_gids}
+    per_cor = {int(g): 0 for g in fixed_gids}
+
+    for xb, y_local in loader:
+        xb = xb.to(device); y_local = y_local.to(device)
+
+        # features → proj (match your training path)
+        model.backbone.eval(); model.proj.eval()
+        feats = model._features(xb)
+        z = model.proj(feats)
+
+        # Allocate full logits [B, K] where K=len(fixed_gids)
+        B, K = z.size(0), len(fixed_gids)
+        logits_full = torch.full((B, K), -1e9, device=device)  # -inf for unseen columns
+
+        # If we have any known rows, compute them and place into their columns
+        if len(known_cols) > 0:
+            known_rows = [r for r in rows if r >= 0]
+            logits_known = model.head.forward_rows(z, known_rows)  # [B, |known|]
+            logits_full[:, known_cols] = logits_known
+
+        pred_local = logits_full.argmax(dim=1)  # predictions in *local-to-fixed* index space
+
+        total += y_local.size(0)
+        correct += (pred_local == y_local).sum().item()
+
+        # per-class (indexed by gid)
+        for col, gid in enumerate(fixed_gids):
+            m = (y_local == col)
+            n = int(m.sum().item())
+            if n > 0:
+                per_tot[int(gid)] += n
+                per_cor[int(gid)] += int((pred_local[m] == y_local[m]).sum().item())
+
+    overall = 100.0 * correct / max(1, total)
+    per_class = {
+        int(g): (100.0 * per_cor[int(g)] / per_tot[int(g)] if per_tot[int(g)] > 0 else 0.0)
+        for g in fixed_gids
+    }
     return overall, per_class
 
 # Quantisation Helpers
