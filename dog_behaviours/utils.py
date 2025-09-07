@@ -118,7 +118,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-# ---- Optional: KD / DDR loss between current & teacher on *previous* classes ----
+# ----  KD / DDR loss between current & teacher on *previous* classes ----
 def kd_loss_ce(current_logits, teacher_logits, T=2.0, weight=1.0):
     # logits expected over the same class rows
     pc = torch.log_softmax(current_logits / T, dim=1)

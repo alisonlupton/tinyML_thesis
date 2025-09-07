@@ -10,6 +10,7 @@ import pandas as pd
 import random 
 from collections import defaultdict
 from math import ceil
+import os
 
 def split_by_testnum_for_CIL(dog_data, target_dog, verbose=True):
     
@@ -163,7 +164,7 @@ def train_with_simplified_tdm(model, cfg, registry, task_classes, teacher, prev_
             logits_prev = model.head.forward_rows(feats_batch, list(range(prev_num)))
             with torch.no_grad():
                 teacher_logits = teacher(feats_batch)
-            loss += kd_loss_ce(logits_prev, teacher_logits, T=2.0, weight=kd_weight)
+            loss += kd_loss_ce(logits_prev, teacher_logits, T=cfg['kd_temp'], weight=kd_weight)
 
 
         #--------- CWI Updating
@@ -236,6 +237,66 @@ def CIL_post_task_eval(seen_classes, test_loader, device, all_behaviors, model, 
         
         return class_acc, overall_acc
     
+def save_CIL_progression_to_csv(cfg, backbone_class_acc, accuracy_history, plot_dir):
+    """
+    Save CIL progression data to CSV for multi-seed analysis.
+    """
+    # Get seed from config
+    seed = cfg.get('random_seed', 'unknown')
+    
+    # Prepare data for CSV
+    csv_data = []
+    
+    # Add backbone data
+    for behavior, accuracy in backbone_class_acc.items():
+        csv_data.append({
+            'seed': seed,
+            'stage': 'Backbone',
+            'behavior': behavior,
+            'accuracy': accuracy,
+            'overall_accuracy': sum(backbone_class_acc.values()) / len(backbone_class_acc)
+        })
+    
+    # Add CIL task data
+    for task_idx, task_metrics in enumerate(accuracy_history):
+        stage = f'Task_{task_idx + 1}'
+        
+        # Handle new data structure with both class_acc and overall_acc
+        if isinstance(task_metrics, dict):
+            class_acc = task_metrics['class_acc']
+            overall_acc = task_metrics['overall_acc']
+        else:
+            # Backward compatibility for old format
+            class_acc = task_metrics
+            overall_acc = sum(class_acc.values()) / len(class_acc)
+        
+        for behavior, accuracy in class_acc.items():
+            csv_data.append({
+                'seed': seed,
+                'stage': stage,
+                'behavior': behavior,
+                'accuracy': accuracy,
+                'overall_accuracy': overall_acc
+            })
+    
+    # Create DataFrame and save
+    df = pd.DataFrame(csv_data)
+    
+    # Append to existing file or create new one
+    csv_file = os.path.join(plot_dir, 'cil_progression_data.csv')
+    if os.path.exists(csv_file) and os.path.getsize(csv_file) > 0:
+        try:
+            existing_df = pd.read_csv(csv_file)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            # File exists but is empty or corrupted, start fresh
+            combined_df = df
+    else:
+        combined_df = df
+    
+    combined_df.to_csv(csv_file, index=False)
+    print(f"CIL progression data saved to {csv_file}")
+
 def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
     
     # Set seaborn style to match other plots
@@ -365,7 +426,11 @@ def make_CIL_plots(cfg, backbone_class_acc, accuracy_history):
     plt.savefig(f'{plot_dir}/intelligent_tdm_overall_progression.png', dpi=300, bbox_inches='tight')
     # plt.show()
     
+    # Save CSV data for multi-seed analysis
+    save_CIL_progression_to_csv(cfg, backbone_class_acc, accuracy_history, plot_dir)
+    
     print(f"\nResults saved to:")
     print(f"  - plots/ intelligent_tdm_per_class_progression.png")
     print(f"  - plots/ intelligent_tdm_overall_progression.png")
+    print(f"  - plots/ cil_progression_data.csv")
     # print(f"TinyML metrics saved to plots/tdm_intelligent_metrics.csv")

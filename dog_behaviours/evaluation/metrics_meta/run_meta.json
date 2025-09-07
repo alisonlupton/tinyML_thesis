@@ -1,0 +1,135 @@
+{
+  "seed": 42,
+  "backbone_behaviors": [
+    "Standing",
+    "Walking",
+    "Sitting",
+    "Lying chest"
+  ],
+  "cil_tasks": [
+    [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest",
+      "Sniffing"
+    ],
+    [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest",
+      "Sniffing",
+      "Trotting"
+    ],
+    [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest",
+      "Sniffing",
+      "Trotting",
+      "Galloping"
+    ]
+  ],
+  "all_behaviors": [
+    "Standing",
+    "Walking",
+    "Sitting",
+    "Lying chest",
+    "Sniffing",
+    "Trotting",
+    "Galloping"
+  ],
+  "train_mean": null,
+  "train_std": null,
+  "cfg": {
+    "raw_data_path": "../data/DogMoveData_csv_format/DogMoveData.csv",
+    "dog_info_path": "../data/DogMoveData_csv_format/DogInfo.xlsx",
+    "cleaned_data_path": "../data/DogMoveData_csv_format/DogMoveData_clean.csv",
+    "min_segment_length": 100,
+    "sample_rate_hz": 100,
+    "window_seconds": 1,
+    "stride_seconds": 0.5,
+    "flatten_windows": false,
+    "use_acc": true,
+    "use_gyro": true,
+    "sensor_locations": [
+      "Back",
+      "Neck"
+    ],
+    "random_seed": 42,
+    "num_pretrain_dogs": 10,
+    "main_behaviors": [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest",
+      "Sniffing",
+      "Trotting",
+      "Galloping"
+    ],
+    "backbone_behaviors": [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest"
+    ],
+    "cil_behaviors": [
+      "Sniffing",
+      "Trotting",
+      "Galloping"
+    ],
+    "cil_tasks": [
+      [
+        "Standing",
+        "Walking",
+        "Sitting",
+        "Lying chest",
+        "Sniffing"
+      ],
+      [
+        "Standing",
+        "Walking",
+        "Sitting",
+        "Lying chest",
+        "Sniffing",
+        "Trotting"
+      ],
+      [
+        "Standing",
+        "Walking",
+        "Sitting",
+        "Lying chest",
+        "Sniffing",
+        "Trotting",
+        "Galloping"
+      ]
+    ],
+    "backbone_learning_rate": 0.001,
+    "backbone_weight_decay": 0.0001,
+    "backbone_epochs": 50,
+    "backbone_batch_size_train": 32,
+    "backbone_batch_size_val": 32,
+    "backbone_sparsity_ratio": 0.0,
+    "buffer_size": 5000,
+    "sparsity_ratio": 0.3,
+    "CIL_batch_size_train": 1,
+    "replay_batch_size": 1,
+    "CIL_batch_size_test": 1,
+    "CIL_epochs": 10,
+    "CIL_learning_rate": 0.001,
+    "ddr_kd_weight": 0.5,
+    "kd_temp": 2.0,
+    "p_intra": 0.02,
+    "p_inter": 0.05,
+    "delta_k": 4,
+    "cwi_alpha": 1.0,
+    "cwi_beta": 1.0,
+    "cwi_ema": 0.9,
+    "metrics_path": "plots_and_metrics/dog_cil_metrics.txt",
+    "plot_dir": "plots_and_metrics",
+    "select_breeds": [],
+    "select_dog_ids": []
+  }
+}

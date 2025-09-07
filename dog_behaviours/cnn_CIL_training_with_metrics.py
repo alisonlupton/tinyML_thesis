@@ -1,5 +1,8 @@
 # cnn_CIL_training_with_metrics.py
 
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 import torch
 torch.use_deterministic_algorithms(True)  # PyTorch ≥1.8
@@ -17,236 +20,16 @@ from report_plotting import CILTrainingPlotter
 import random
 import pandas as pd
 import numpy as np
-from datetime import datetime
 import os
-
-def calculate_cl_metrics_from_matrix(R_full, random_baseline_full, K_plus_1):
-    # R_full: (K+1)x(K+1) including backbone at index 0.
-    # K_plus_1: number of rows/cols to consider (backbone + K tasks).
-    R_tasks = R_full[1:K_plus_1, 1:K_plus_1]       # K x K tasks-only
-    K = R_tasks.shape[0]
-    baselines = random_baseline_full[1:K_plus_1]   # length K, in %
-
-    # ACC_K: last row over tasks only
-    avg_acc = float(np.mean(R_tasks[-1,:])) if K > 0 else 0.0
-
-    # A_K
-    if K > 0:
-        s = 0.0
-        for i in range(K):
-            for j in range(i+1):
-                s += R_tasks[i,j]
-        avg_inc_acc = (2.0/(K*(K+1))) * s
-    else:
-        avg_inc_acc = 0.0
-
-    # AF_K
-    if K > 1:
-        s = 0.0
-        for j in range(K-1):
-            s += float(np.max(R_tasks[:K-1, j])) - float(R_tasks[K-1, j])
-        avg_forg = s / (K-1)
-    else:
-        avg_forg = 0.0
-
-    # BWT_K
-    if K > 1:
-        s = 0.0
-        for j in range(K-1):
-            s += float(R_tasks[K-1, j]) - float(R_tasks[j, j])
-        bwt = s / (K-1)
-    else:
-        bwt = 0.0
-
-    # FWT_K uses R_full[j-1, j]
-    if K > 1:
-        s = 0.0
-        for j in range(1, K+1):  # j=1..K in task indexing
-            s += float(R_full[j-1, j]) - float(baselines[j-1])
-        fwt = s / (K-1)
-    else:
-        fwt = 0.0
-
-    # κ (modified BWT)
-    if K > 1:
-        s = 0.0
-        for i in range(1, K):
-            for j in range(i):
-                s += float(R_tasks[i, j]) - float(R_tasks[j, j])
-        kappa = (2.0/(K*(K-1))) * s
-    else:
-        kappa = 0.0
-
-    # ζ (modified FWT)
-    if K > 1:
-        s = 0.0
-        for i in range(K):
-            for j in range(i+1, K):
-                s += float(R_tasks[i, j])
-        zeta = (2.0/(K*(K-1))) * s
-    else:
-        zeta = 0.0
-
-    # Intransigence
-    if K > 0:
-        optimal = np.max(R_tasks, axis=0)
-        actual  = R_tasks[-1, :]
-        intransigence = float(np.mean(optimal - actual))
-    else:
-        intransigence = 0.0
-    print(f"R: {R_full}")
-    return {"avg_acc": avg_acc, "avg_inc_acc": avg_inc_acc, "avg_forg": avg_forg,
-            "bwt": bwt, "fwt": fwt, "kappa": kappa, "zeta": zeta, "intransigence": intransigence}
-    
-
-def save_metrics_to_csv(seed, backbone_class_acc, accuracy_history, training_loss_history, cl_metrics, resource_report, output_dir="plots_and_metrics_seeded"):
-    """
-    Save all metrics to CSV files for analysis across multiple seeds.
-    """
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 1. Save backbone validation metrics
-    backbone_data = []
-    for behavior, acc in backbone_class_acc.items():
-        backbone_data.append({
-            'seed': seed,
-            'stage': 'Backbone_Val',
-            'behavior': behavior,
-            'accuracy': acc,
-            'overall_accuracy': backbone_class_acc.get('overall_acc', max(backbone_class_acc.values())),
-            'metric_type': 'validation'
-        })
-    
-    # 2. Save CIL task metrics
-    cil_data = []
-    for task_idx, task_metrics in enumerate(accuracy_history):
-        task_name = f"Task_{task_idx + 1}"
-        
-        # Test metrics (per-class and overall)
-        for behavior, acc in task_metrics['class_acc'].items():
-            cil_data.append({
-                'seed': seed,
-                'stage': f'{task_name}_Test',
-                'behavior': behavior,
-                'accuracy': acc,
-                'overall_accuracy': task_metrics['overall_acc'],
-                'metric_type': 'test'
-            })
-    
-    # 2.5. Save CIL training loss metrics
-    training_loss_data = []
-    for task_loss_metrics in training_loss_history:
-        task_name = task_loss_metrics['task_name']
-        
-        # Add summary training loss metrics
-        training_loss_data.append({
-            'seed': seed,
-            'stage': f'{task_name}_Training',
-            'task_idx': task_loss_metrics['task_idx'],
-            'final_training_loss': task_loss_metrics['final_training_loss'],
-            'avg_training_loss': task_loss_metrics['avg_training_loss'],
-            'metric_type': 'training_loss'
-        })
-        
-        # Add per-epoch training losses
-        for epoch, loss in enumerate(task_loss_metrics['training_losses']):
-            training_loss_data.append({
-                'seed': seed,
-                'stage': f'{task_name}_Training_Epoch_{epoch}',
-                'task_idx': task_loss_metrics['task_idx'],
-                'epoch': epoch,
-                'training_loss': loss,
-                'metric_type': 'training_loss_epoch'
-            })
-    
-    # 3. Save continual learning metrics (per-task)
-    cl_data = []
-    for task_metrics in cl_metrics:
-        task_id = task_metrics.get('task', 'unknown')
-        for metric_name, value in task_metrics.items():
-            if metric_name != 'task':
-                cl_data.append({
-                    'seed': seed,
-                    'task': task_id,
-                    'metric': metric_name,
-                    'value': value
-                })
-    
-    # 4. Save resource metrics
-    resource_data = []
-    if hasattr(resource_report, 'to_dict'):
-        resource_dict = resource_report.to_dict()
-        for metric_name, value in resource_dict.items():
-            resource_data.append({
-                'seed': seed,
-                'metric': metric_name,
-                'value': value
-            })
-    
-    # Save to CSV files
-    backbone_df = pd.DataFrame(backbone_data)
-    cil_df = pd.DataFrame(cil_data)
-    training_loss_df = pd.DataFrame(training_loss_data)
-    cl_df = pd.DataFrame(cl_data)
-    resource_df = pd.DataFrame(resource_data)
-    
-    # Append to existing files or create new ones
-    backbone_file = os.path.join(output_dir, "seeded_accuracy_metrics.csv")
-    training_loss_file = os.path.join(output_dir, "seeded_training_loss_metrics.csv")
-    cl_file = os.path.join(output_dir, "seeded_cl_metrics.csv")
-    resource_file = os.path.join(output_dir, "seeded_resource_metrics.csv")
-    
-    # Append backbone and CIL data to accuracy file
-    accuracy_df = pd.concat([backbone_df, cil_df], ignore_index=True)
-    if os.path.exists(backbone_file) and os.path.getsize(backbone_file) > 0:
-        try:
-            existing_df = pd.read_csv(backbone_file)
-            combined_df = pd.concat([existing_df, accuracy_df], ignore_index=True)
-        except (pd.errors.EmptyDataError, pd.errors.ParserError):
-            # File exists but is empty or corrupted, start fresh
-            combined_df = accuracy_df
-    else:
-        combined_df = accuracy_df
-    combined_df.to_csv(backbone_file, index=False)
-    
-    # Append training loss metrics
-    if os.path.exists(training_loss_file) and os.path.getsize(training_loss_file) > 0:
-        try:
-            existing_df = pd.read_csv(training_loss_file)
-            combined_df = pd.concat([existing_df, training_loss_df], ignore_index=True)
-        except (pd.errors.EmptyDataError, pd.errors.ParserError):
-            # File exists but is empty or corrupted, start fresh
-            combined_df = training_loss_df
-    else:
-        combined_df = training_loss_df
-    combined_df.to_csv(training_loss_file, index=False)
-    
-    # Append CL metrics
-    if os.path.exists(cl_file) and os.path.getsize(cl_file) > 0:
-        try:
-            existing_df = pd.read_csv(cl_file)
-            combined_df = pd.concat([existing_df, cl_df], ignore_index=True)
-        except (pd.errors.EmptyDataError, pd.errors.ParserError):
-            # File exists but is empty or corrupted, start fresh
-            combined_df = cl_df
-    else:
-        combined_df = cl_df
-    combined_df.to_csv(cl_file, index=False)
-    
-    # Append resource metrics
-    if os.path.exists(resource_file) and os.path.getsize(resource_file) > 0:
-        try:
-            existing_df = pd.read_csv(resource_file)
-            combined_df = pd.concat([existing_df, resource_df], ignore_index=True)
-        except (pd.errors.EmptyDataError, pd.errors.ParserError):
-            # File exists but is empty or corrupted, start fresh
-            combined_df = resource_df
-    else:
-        combined_df = resource_df
-    combined_df.to_csv(resource_file, index=False)
-    
-    print(f"Metrics saved to CSV files in {output_dir}/")
+import json
+def serialize_registry(registry):
+    return {
+        "all_behaviors": registry.all_behaviors,          # the fixed universe
+        "row_for_global": registry.row_for_global,        # mapping {class_name -> row_idx}
+        "global_for_row": registry.global_for_row,        # list of class_names in row order
+        "seen_names": registry.seen_classes(),            # redundant but handy
+        "num_classes": registry.num_classes(),
+    }
 
 def main():
     """Main function"""
@@ -274,6 +57,12 @@ def main():
     # CIL task progression
     cil_tasks = cfg['cil_tasks']
     
+    # metric on time
+    rand_baseline = {f"T{k+1}": 100.0/len(task) for k, task in enumerate(cil_tasks)}
+    os.makedirs("evaluation/metrics_meta", exist_ok=True)
+    with open("evaluation/metrics_meta/random_baseline.json", "w") as f:
+        json.dump(rand_baseline, f, indent=2)
+        
     # Device setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -396,34 +185,7 @@ def main():
     for cls, acc in class_acc.items():
         print(f"  {cls}: {acc:.2f}%")
     
-    
-    # Initialize accuracy matrix R for CL metrics calculation
-    # R[i,j] = accuracy on task j after training on task i
-    # R[0,:] = backbone performance on all tasks
-    # R[1,:] = performance after task 1, etc.
-    num_tasks = len(cil_tasks)
-    accuracy_matrix = np.zeros((num_tasks + 1, num_tasks + 1))  # 4x4 matrix (backbone + 3 tasks)
-    random_baseline = np.zeros(num_tasks + 1)  # Random accuracy for each task (including backbone)
-    
-    
-    # calculate backbone first! (only on 4 classes instead of 7)
-    # R[0,0] = backbone accuracy on backbone task (4 classes)
-    bb_map, bb_gids = make_global_to_local_map(backbone_behaviors, behavior_to_idx, device=y_test.device)
-    bb_mask = torch.isin(y_test, bb_gids)
-    bb_X = X_test[bb_mask]
-    bb_y_global = m_test[y_test[bb_mask]]  # GLOBAL labels 0..6
-
-    if len(bb_X) > 0:
-        bb_loader = DataLoader(TensorDataset(bb_X, bb_y_global),
-                            batch_size=cfg['CIL_batch_size_test'], shuffle=False)
-        bb_class_acc, bb_overall_acc = CIL_post_task_eval(backbone_behaviors, bb_loader,
-                                                        device, all_behaviors, backbone_model, backbone_registry)
-        accuracy_matrix[0, 0] = bb_overall_acc
-    
-  
-    
-    
-    
+       
     #####################################################################################################################
     #--------------------------------------- STEP 5: PERFORM CIL SCENARIO
     #####################################################################################################################
@@ -443,7 +205,6 @@ def main():
     backbone_class_acc = class_acc
     
     
-        
     # Measure Sizing! 
     report = profile_cil_resources(
         cfg,
@@ -469,6 +230,24 @@ def main():
     p_inter = cfg['p_inter']   
     delta_k = cfg['delta_k']    
     
+    # Pre-CIL metrics
+    test_feats = cil_model.backbone(X_test).detach().cpu()  # shape [N_test, D]
+    torch.save({"feats": test_feats, "y_global": y_test.cpu(), "m_test": m_test.cpu()}, "evaluation/test_feats.pt")
+    
+    # --- also cache TRAIN features for oracle heads ---
+    train_feats = cil_model.backbone(X_train).detach().cpu()  # shape [N_train, ...]
+    torch.save({"feats": train_feats,
+                "y_global": y_train.cpu(),
+                "m_all": m_test.cpu()},  # reuse mapping to 0..6 if convenient
+            "evaluation/train_feats.pt")
+    # right after you build the CIL head and before Task 1 starts
+    os.makedirs("evaluation/checkpoints_cil", exist_ok=True)
+    torch.save({
+        "task_idx": -1,
+        "head_state": cil_model.head.state_dict(),
+        "registry": serialize_registry(registry),  # same helper you wrote below
+        "seed": seed,
+    }, "evaluation/checkpoints_cil/head_after_T0.pt")
     
     #---------------------------- CIL PRE TASK PIPELINE (TASK NUMBER LEVEL)
     for task_idx, task_classes in enumerate(cil_tasks):
@@ -489,23 +268,7 @@ def main():
             cil_model.expand_head(new_cls, registry)
 
         cil_model.eval()
-        
-        #----------------- FWT pre-eval for new task j
-        # Pre-eval BEFORE adding the new class
-        eval_map, eval_gids = make_global_to_local_map([new_class], behavior_to_idx, device=y_test.device)
-        mask = torch.isin(y_test, eval_gids)
-        X_pre = X_test[mask]
-        y_pre = m_test[y_test[mask]]
 
-        loader = DataLoader(TensorDataset(X_pre, y_pre), batch_size=cfg['CIL_batch_size_test'], shuffle=False)
-
-        # Evaluate with current head (no row for Tj yet → accuracy ≈ random baseline)
-        _, pre_overall = CIL_post_task_eval(registry.seen_classes(), loader, device, all_behaviors, cil_model, registry)
-
-        accuracy_matrix[task_idx, task_idx+1] = pre_overall
-        print(f"FWT pre-eval on {new_class}: {pre_overall:.2f}%")
-        
-        
         # 2) Inter-task expansion (warm up grow before epochs)
         if task_idx > 0:
             cil_model.head.update_mask_inter(p = p_inter)
@@ -596,82 +359,8 @@ def main():
             'final_training_loss': task_training_losses[-1] if task_training_losses else 0.0,
             'avg_training_loss': sum(task_training_losses) / len(task_training_losses) if task_training_losses else 0.0
         })
-        
-        # Fill accuracy matrix R[i,j] = accuracy on task j after training on task i
-        # For each task j that we've seen so far, evaluate on task j's classes
-        for eval_task_idx in range(task_idx + 1):
-            eval_task_classes = cil_tasks[eval_task_idx]
-            
-            # Create test loader for this specific task
-            eval_map, eval_gids = make_global_to_local_map(eval_task_classes, behavior_to_idx, device=y_test.device)
-            eval_mask = torch.isin(y_test, eval_gids)
-            eval_X = X_test[eval_mask]
-            eval_y_global = m_test[y_test[eval_mask]]  # GLOBAL labels
-                        
-            if len(eval_X) > 0:  # Make sure we have data for this task
-                eval_test_loader = DataLoader(TensorDataset(eval_X, eval_y_global), 
-                                            batch_size=cfg['CIL_batch_size_test'], shuffle=False)
-                
-                # Evaluate current model on this task
-                eval_class_acc, eval_overall_acc = CIL_post_task_eval(eval_task_classes, eval_test_loader, 
-                                                                     device, all_behaviors, cil_model, registry)
-                
-                # Store in accuracy matrix (shift indices by 1 to account for backbone as task 0)
-                accuracy_matrix[task_idx + 1, eval_task_idx + 1] = eval_overall_acc
-                
-                # Calculate random baseline for this task (if not already done)
-                if random_baseline[eval_task_idx + 1] == 0:
-                    random_baseline[eval_task_idx + 1] = 100.0 / len(eval_task_classes)  # Random accuracy in percentage
-        
-        # Also evaluate on backbone task (task 0) after each CIL task
-        # R[task_idx+1, 0] = accuracy on backbone classes after training on task i
-        backbone_map, backbone_gids = make_global_to_local_map(backbone_behaviors, behavior_to_idx, device=y_test.device)
-        backbone_mask = torch.isin(y_test, backbone_gids)
-        backbone_X = X_test[backbone_mask]
-        backbone_y = y_test[backbone_mask]
-        backbone_y_global = m_test[backbone_y]  # not backbone_map[..]
-        
-        if len(backbone_X) > 0:
-            backbone_test_loader = DataLoader(TensorDataset(backbone_X, backbone_y_global), 
-                                            batch_size=cfg['CIL_batch_size_test'], shuffle=False)
-            
-            # Evaluate current model on backbone classes
-            cil_model.eval()
-            backbone_class_acc, backbone_overall_acc = CIL_post_task_eval(backbone_behaviors, backbone_test_loader, 
-                                                                         device, all_behaviors, cil_model, registry)
-            
-            # Store in accuracy matrix: R[task_idx+1, 0] = accuracy on backbone after task i
-            accuracy_matrix[task_idx + 1, 0] = backbone_overall_acc
-            
-            print(f"  Backbone classes: {backbone_overall_acc:.2f}%")
-        
-        # --- fill R[i,j] for j>i
-        for future_idx in range(task_idx+1, num_tasks):
-            future_classes = cil_tasks[future_idx]
-            f_map, f_gids = make_global_to_local_map(future_classes, behavior_to_idx, device=y_test.device)
-            f_mask = torch.isin(y_test, f_gids)
-            Xf = X_test[f_mask]
-            yf_global = m_test[y_test[f_mask]]
 
-            if len(Xf) > 0:
-                f_loader = DataLoader(
-                    TensorDataset(Xf, yf_global),
-                    batch_size=cfg['CIL_batch_size_test'], shuffle=False
-                )
 
-                cil_model.eval()
-                correct, total = 0, 0
-                with torch.no_grad():
-                    for xb, yb in f_loader:
-                        xb, yb = xb.to(device), yb.to(device)
-                        logits = cil_model(xb)        # use current full head
-                        preds = logits.argmax(dim=1)  # pick max logit
-                        correct += (preds == yb).sum().item()
-                        total += yb.size(0)
-
-                f_overall = (correct / total) * 100 if total > 0 else 0.0
-                accuracy_matrix[task_idx+1, future_idx+1] = f_overall
-        
         # Add to plotter
         task_name = f"Task {task_idx+1}: {new_class}"
         plotter.add_cil_task(task_name, class_acc, overall_acc)
@@ -685,62 +374,70 @@ def main():
             print("Eval so far:", overall_acc)
             for cls, acc in class_acc.items():
                 print(f"  {cls}: {acc:.2f}%")
+                
+        # ---------------------------------------- End of task metric updating
+        # === after finishing training Task i ===
+        # 1) save head checkpoint
+        ckpt_dir = "evaluation/checkpoints_cil"
+        os.makedirs(ckpt_dir, exist_ok=True)
+        ckpt = {
+            "task_idx": task_idx,
+            "head_state": cil_model.head.state_dict(),
+            "registry": serialize_registry(registry),
+            "seed": seed,
+        }
+        torch.save(ckpt, os.path.join(ckpt_dir, f"head_after_T{task_idx+1}.pt"))
+
+        ## MASKS
+        task_mask_dir = "evaluation/task_masks"
+        os.makedirs(task_mask_dir, exist_ok=True)
+        
+        # --- cumulative TEST mask 
+        eval_map, eval_gids = make_global_to_local_map(task_classes, behavior_to_idx, device="cpu")
+        eval_mask = torch.isin(y_test.cpu(), eval_gids.cpu()).numpy()
+        np.save(os.path.join(task_mask_dir, f"mask_T{task_idx+1}.npy"), eval_mask)
+
+        # --- NEW-CLASS-ONLY TEST mask (for “pure FWT”)
+        new_cls = task_classes[prev_num:]  # classes introduced at this task
+        if len(new_cls) > 0:
+            _, new_gids = make_global_to_local_map(new_cls, behavior_to_idx, device="cpu")
+            new_mask = torch.isin(y_test.cpu(), new_gids.cpu()).numpy()
+            np.save(os.path.join(task_mask_dir, f"mask_T{task_idx+1}_new.npy"), new_mask)
+
+        # --- cumulative TRAIN mask (already in your code)
+        train_eval_map, train_eval_gids = make_global_to_local_map(task_classes, behavior_to_idx, device="cpu")
+        train_mask = torch.isin(y_train.cpu(), train_eval_gids.cpu()).numpy()
+        np.save(os.path.join(task_mask_dir, f"mask_train_T{task_idx+1}.npy"), train_mask)
+
+        # --- NEW-CLASS-ONLY TRAIN mask (optional, symmetry / diagnostics)
+        if len(new_cls) > 0:
+            _, new_train_gids = make_global_to_local_map(new_cls, behavior_to_idx, device="cpu")
+            new_train_mask = torch.isin(y_train.cpu(), new_train_gids.cpu()).numpy()
+            np.save(os.path.join(task_mask_dir, f"mask_train_T{task_idx+1}_new.npy"), new_train_mask)
+        # record random baseline for this task (optional: collect to a JSON/CSV)
+        rand_baseline = 100.0 / len(task_classes)
     
     print("CIL PIPELINE FINISHED!")
 
-    # Calculate continual learning metrics from accuracy matrix
-    print("\n" + "="*50)
-    print("CALCULATING CONTINUAL LEARNING METRICS FROM ACCURACY MATRIX")
-    print("="*50)
-    
-    # Print accuracy matrix for debugging
-    print("Accuracy Matrix R (rows=after training on task, cols=accuracy on task):")
-    print("Task\\After:", end="")
-    print("  B", end="")  # Backbone
-    for j in range(num_tasks):
-        print(f"  T{j+1}", end="")
-    print()
-    print("After B:", end="")  # Backbone row
-    for j in range(num_tasks + 1):
-        print(f"  {accuracy_matrix[0,j]:.2f}", end="")
-    print()
-    for i in range(num_tasks):
-        print(f"After T{i+1}:", end="")
-        for j in range(num_tasks + 1):
-            print(f"  {accuracy_matrix[i+1,j]:.2f}", end="")
-        print()
-    
-    # Calculate CL metrics for each task (progressive)
-    all_cl_metrics = []
-    
-    for K in range(1, num_tasks + 1):  # K = 1, 2, 3
-        print(f"\n--- CL Metrics after Task {K} ---")
-        
-        # Use submatrix R[0:K+1, 0:K+1] for calculation (including backbone)
-        R_sub = accuracy_matrix[:K+1, :K+1]
-        baseline_sub = random_baseline[:K+1]
-        
-        # Calculate CL metrics for this K (K+1 because we include backbone)
-        task_cl_metrics = calculate_cl_metrics_from_matrix(R_sub, baseline_sub, K+1)
-        task_cl_metrics['task'] = K
-        all_cl_metrics.append(task_cl_metrics)
-        
-        print(f"Task {K} CL Metrics:")
-        for metric_name, value in task_cl_metrics.items():
-            if metric_name != 'task':
-                print(f"  {metric_name}: {value:.2f}%")
-    
-    # Save all metrics to CSV (including per-task CL metrics)
-    save_metrics_to_csv(seed, backbone_class_acc, accuracy_history, training_loss_history, all_cl_metrics, report)
-    
     # Save results
     results = {
         'accuracy_history': accuracy_history,
         'final_accuracy': overall_acc,
         'final_class_acc': class_acc,
-        'cl_metrics': all_cl_metrics,
         'backbone_class_acc': backbone_class_acc
     }
+    meta = {
+        "seed": seed,
+        "backbone_behaviors": backbone_behaviors,
+        "cil_tasks": cil_tasks,
+        "all_behaviors": all_behaviors,
+        "train_mean": getattr(backbone_data, "train_mean", None),
+        "train_std": getattr(backbone_data, "train_std", None),
+        "cfg": cfg,
+    }
+    with open("evaluation/metrics_meta/run_meta.json", "w") as f:
+        json.dump(meta, f, indent=2, default=lambda o: o if isinstance(o,(int,float,str,bool,list,dict)) else None)
+        
     
     # Generate all plots and reports
     print("\n" + "="*50)

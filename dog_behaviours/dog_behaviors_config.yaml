@@ -20,8 +20,8 @@ sensor_locations: ["Back", "Neck"]
 # General Training
 random_seed: 42
 num_pretrain_dogs: 10
-backbone_val_dog: 48
-target_dog: 47
+# backbone_val_dog: 48
+# target_dog: 47
 main_behaviors:
   [
     "Standing",
@@ -38,7 +38,15 @@ cil_tasks:
   [
     ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing"],
     ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing", "Trotting"],
-    ["Standing", "Walking", "Sitting", "Lying chest", "Sniffing", "Trotting", "Galloping",],
+    [
+      "Standing",
+      "Walking",
+      "Sitting",
+      "Lying chest",
+      "Sniffing",
+      "Trotting",
+      "Galloping",
+    ],
   ]
 
 # Backbone training
@@ -49,7 +57,6 @@ backbone_batch_size_train: 32
 backbone_batch_size_val: 32
 backbone_sparsity_ratio: 0.0
 
-
 # CIL training
 buffer_size: 5000
 sparsity_ratio: 0.3
@@ -59,13 +66,14 @@ CIL_batch_size_test: 1
 CIL_epochs: 10
 CIL_learning_rate: 0.001
 ddr_kd_weight: 0.5
+kd_temp: 2.0
 p_intra: 0.02
 p_inter: 0.05
 delta_k: 4
 cwi_alpha: 1.0
 cwi_beta: 1.0
 cwi_ema: 0.9 # optional, not in SparCL
-metrics_path: "plots_and_metrics/dog_cil_metrics.txt"
+metrics_path: "report_metrics/dog_cil_metrics.txt"
 plot_dir: "plots_and_metrics"
 
 # If set, only include these breeds (names must match DogInfo.xlsx). Leave empty to keep all.

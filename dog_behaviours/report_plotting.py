@@ -57,8 +57,9 @@ print("Plot saved to 'plots_and_metrics/behavior_distribution.png'")
 class CILTrainingPlotter:
     """Class to handle plotting for CIL training experiments"""
     
-    def __init__(self, save_dir='plots_and_metrics'):
+    def __init__(self, save_dir='plots_and_metrics', seed=None):
         self.save_dir = save_dir
+        self.seed = seed
         os.makedirs(save_dir, exist_ok=True)
         
         # Set seaborn style
@@ -164,6 +165,9 @@ class CILTrainingPlotter:
         if save_plot:
             plt.savefig(f'{self.save_dir}/backbone_training.png', dpi=300, bbox_inches='tight')
             print(f"Backbone training plot saved to {self.save_dir}/backbone_training.png")
+            
+            # Save backbone training data to CSV
+            self.save_backbone_training_to_csv()
         
         # plt.show()
     
@@ -302,9 +306,9 @@ class CILTrainingPlotter:
             
             # Plot training loss
             ax_loss = axes[0, task_idx]
-            ax_loss.plot(epochs, train_losses, 'b-', label='Training Loss', linewidth=2, color=colors[task_idx])
+            ax_loss.plot(epochs, train_losses, '-', label='Training Loss', linewidth=2, color=colors[task_idx])
             if val_losses:
-                ax_loss.plot(epochs, val_losses, 'r--', label='Validation Loss', linewidth=2, color=colors[task_idx], alpha=0.7)
+                ax_loss.plot(epochs, val_losses, '--', label='Validation Loss', linewidth=2, color=colors[task_idx], alpha=0.7)
             ax_loss.set_xlabel('Epoch', fontsize=10)
             ax_loss.set_ylabel('Loss', fontsize=10)
             ax_loss.set_title(f'{task_name} - Loss', fontsize=12, fontweight='bold')
@@ -313,9 +317,9 @@ class CILTrainingPlotter:
             
             # Plot training accuracy
             ax_acc = axes[1, task_idx]
-            ax_acc.plot(epochs, train_accs, 'b-', label='Training Accuracy', linewidth=2, color=colors[task_idx])
+            ax_acc.plot(epochs, train_accs, '-', label='Training Accuracy', linewidth=2, color=colors[task_idx])
             if val_accs:
-                ax_acc.plot(epochs, val_accs, 'r--', label='Validation Accuracy', linewidth=2, color=colors[task_idx], alpha=0.7)
+                ax_acc.plot(epochs, val_accs, '--', label='Validation Accuracy', linewidth=2, color=colors[task_idx], alpha=0.7)
             ax_acc.set_xlabel('Epoch', fontsize=10)
             ax_acc.set_ylabel('Accuracy (%)', fontsize=10)
             ax_acc.set_title(f'{task_name} - Accuracy', fontsize=12, fontweight='bold')
@@ -327,8 +331,162 @@ class CILTrainingPlotter:
         if save_plot:
             plt.savefig(f'{self.save_dir}/cil_training_curves.png', dpi=300, bbox_inches='tight')
             print(f"CIL training curves plot saved to {self.save_dir}/cil_training_curves.png")
+            
+            # Save training curves data to CSV
+            self.save_training_curves_to_csv()
         
         # plt.show()
+    
+    def save_training_curves_to_csv(self):
+        """Save CIL training curves data to CSV for multi-seed analysis"""
+        if not self.cil_training_metrics['task_names']:
+            print("No CIL training metrics to save!")
+            return
+        
+        # Get seed from config (you'll need to pass this to the plotter)
+        seed = getattr(self, 'seed', 'unknown')
+        
+        # Prepare data for CSV
+        csv_data = []
+        
+        for task_idx, task_name in enumerate(self.cil_training_metrics['task_names']):
+            epochs = self.cil_training_metrics['task_epochs'][task_idx]
+            train_losses = self.cil_training_metrics['task_training_losses'][task_idx]
+            train_accs = self.cil_training_metrics['task_training_accuracies'][task_idx]
+            val_losses = self.cil_training_metrics['task_validation_losses'][task_idx]
+            val_accs = self.cil_training_metrics['task_validation_accuracies'][task_idx]
+            
+            for epoch_idx, epoch in enumerate(epochs):
+                # Training data
+                csv_data.append({
+                    'seed': seed,
+                    'task_name': task_name,
+                    'task_idx': task_idx,
+                    'epoch': epoch,
+                    'metric_type': 'training_loss',
+                    'value': train_losses[epoch_idx] if epoch_idx < len(train_losses) else None
+                })
+                
+                csv_data.append({
+                    'seed': seed,
+                    'task_name': task_name,
+                    'task_idx': task_idx,
+                    'epoch': epoch,
+                    'metric_type': 'training_accuracy',
+                    'value': train_accs[epoch_idx] if epoch_idx < len(train_accs) else None
+                })
+                
+                # Validation data (if available)
+                if val_losses and epoch_idx < len(val_losses):
+                    csv_data.append({
+                        'seed': seed,
+                        'task_name': task_name,
+                        'task_idx': task_idx,
+                        'epoch': epoch,
+                        'metric_type': 'validation_loss',
+                        'value': val_losses[epoch_idx]
+                    })
+                
+                if val_accs and epoch_idx < len(val_accs):
+                    csv_data.append({
+                        'seed': seed,
+                        'task_name': task_name,
+                        'task_idx': task_idx,
+                        'epoch': epoch,
+                        'metric_type': 'validation_accuracy',
+                        'value': val_accs[epoch_idx]
+                    })
+        
+        # Create DataFrame and save
+        df = pd.DataFrame(csv_data)
+        
+        # Append to existing file or create new one
+        csv_file = os.path.join(self.save_dir, 'cil_training_curves_data.csv')
+        if os.path.exists(csv_file) and os.path.getsize(csv_file) > 0:
+            try:
+                existing_df = pd.read_csv(csv_file)
+                combined_df = pd.concat([existing_df, df], ignore_index=True)
+            except (pd.errors.EmptyDataError, pd.errors.ParserError):
+                # File exists but is empty or corrupted, start fresh
+                combined_df = df
+        else:
+            combined_df = df
+        
+        combined_df.to_csv(csv_file, index=False)
+        print(f"CIL training curves data saved to {csv_file}")
+    
+    def save_backbone_training_to_csv(self):
+        """Save backbone training data to CSV for multi-seed analysis"""
+        if not self.backbone_metrics['epochs']:
+            print("No backbone training metrics to save!")
+            return
+        
+        # Get seed
+        seed = getattr(self, 'seed', 'unknown')
+        
+        # Prepare data for CSV
+        csv_data = []
+        
+        epochs = self.backbone_metrics['epochs']
+        train_losses = self.backbone_metrics['train_loss']
+        val_losses = self.backbone_metrics['val_loss']
+        train_accs = self.backbone_metrics['train_acc']
+        val_accs = self.backbone_metrics['val_acc']
+        
+        for epoch_idx, epoch in enumerate(epochs):
+            # Training loss
+            csv_data.append({
+                'seed': seed,
+                'stage': 'Backbone',
+                'epoch': epoch,
+                'metric_type': 'training_loss',
+                'value': train_losses[epoch_idx] if epoch_idx < len(train_losses) else None
+            })
+            
+            # Training accuracy
+            csv_data.append({
+                'seed': seed,
+                'stage': 'Backbone',
+                'epoch': epoch,
+                'metric_type': 'training_accuracy',
+                'value': train_accs[epoch_idx] if epoch_idx < len(train_accs) else None
+            })
+            
+            # Validation loss
+            csv_data.append({
+                'seed': seed,
+                'stage': 'Backbone',
+                'epoch': epoch,
+                'metric_type': 'validation_loss',
+                'value': val_losses[epoch_idx] if epoch_idx < len(val_losses) else None
+            })
+            
+            # Validation accuracy
+            csv_data.append({
+                'seed': seed,
+                'stage': 'Backbone',
+                'epoch': epoch,
+                'metric_type': 'validation_accuracy',
+                'value': val_accs[epoch_idx] if epoch_idx < len(val_accs) else None
+            })
+        
+        # Create DataFrame and save
+        df = pd.DataFrame(csv_data)
+        
+        # Append to existing file or create new one
+        csv_file = os.path.join(self.save_dir, 'backbone_training_data.csv')
+        if os.path.exists(csv_file) and os.path.getsize(csv_file) > 0:
+            try:
+                existing_df = pd.read_csv(csv_file)
+                combined_df = pd.concat([existing_df, df], ignore_index=True)
+            except (pd.errors.EmptyDataError, pd.errors.ParserError):
+                # File exists but is empty or corrupted, start fresh
+                combined_df = df
+        else:
+            combined_df = df
+        
+        combined_df.to_csv(csv_file, index=False)
+        print(f"Backbone training data saved to {csv_file}")
     
     def plot_cil_training_summary(self, save_plot=True):
         """Plot a summary of CIL training metrics across all tasks"""

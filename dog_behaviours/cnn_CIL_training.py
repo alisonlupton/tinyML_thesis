@@ -107,7 +107,7 @@ def main():
     backbone_criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
     
     # Initialize plotter for tracking metrics
-    plotter = CILTrainingPlotter()
+    plotter = CILTrainingPlotter(seed=seed)
     
     #####################################################################################################################
     #--------------------------------------- STEP 2: BACKBONE TRAINING AND EVALUATION
@@ -184,25 +184,7 @@ def main():
     
     
         
-    # Measure Sizing! 
-    report = profile_cil_resources(
-        cfg,
-        cil_model, C=C, L=L,
-        batch_size_train=cfg['CIL_batch_size_train'],
-        batch_size_infer=cfg['CIL_batch_size_test'],
-        replay_size=cfg['buffer_size'],
-        optimizer_kind="adam",
-        deployed_bits_backbone=32,
-        deployed_bits_classifier=8,
-        training_bits_classifier=32,
-        replay_bits=8,
-        activation_bits_train=32,
-        activation_bits_infer=32,
-        replay_batch_size=cfg['replay_batch_size'],  
-        kd_prev_rows=len(backbone_behaviors),         
-        kd_enabled=True,                              
-        autograd_grad_for_cwi=True                    
-    )
+
     
     # TDM parameters 
     p_intra = cfg['p_intra']   
@@ -259,6 +241,26 @@ def main():
         optimizer = torch.optim.Adam(cil_model.head.parameters(), lr=cfg['CIL_learning_rate'])
         criterion = nn.CrossEntropyLoss()
         
+        # Check size on last task 
+        if task_idx == 2:
+            report = profile_cil_resources(
+                cfg,
+                cil_model, C=C, L=L,
+                batch_size_train=cfg['CIL_batch_size_train'],
+                batch_size_infer=cfg['CIL_batch_size_test'],
+                replay_size=cfg['buffer_size'],
+                optimizer_kind="adam",
+                deployed_bits_backbone=32,
+                deployed_bits_classifier=8,
+                training_bits_classifier=32,
+                replay_bits=8,
+                activation_bits_train=32,
+                activation_bits_infer=32,
+                replay_batch_size=cfg['replay_batch_size'],
+                kd_prev_rows=prev_num,            # <-- key fix
+                kd_enabled=True,
+                autograd_grad_for_cwi=True
+            )
         #---------------------------- CIL DURING TASK PIPELINE (EPOCH NUMBER LEVEL)
         for epoch in range(cfg['CIL_epochs']):
             # Ensure frozen
@@ -352,7 +354,7 @@ def main():
     # plotter.save_metrics()
     
     # Create summary report
-    # plotter.create_summary_report()
+    #plotter.create_summary_report()
     
     # Call original plotting function as well
     make_CIL_plots(cfg, backbone_class_acc, accuracy_history)
