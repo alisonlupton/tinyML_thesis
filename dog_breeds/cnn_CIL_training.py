@@ -1,11 +1,8 @@
 # cnn_CIL_training.py
-"""
-Simplified TDM Pipeline with Intelligent Sampling: Following SparCL paper more closely
-"""
+
 
 import torch
 torch.backends.quantized.engine = 'qnnpack'  
-
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from process_dog_data import process_dog_data
@@ -19,6 +16,7 @@ import json
 from pathlib import Path
 import pandas as pd
 import types
+
 
 def build_seen_df(full_df: pd.DataFrame, seen_gids: list[int]) -> pd.DataFrame:
     """
@@ -166,6 +164,7 @@ def main():
     registry.add_gids(backbone_gids)  # seed with base backbone dogs
     
     replay_buffer_q.on_new_task(backbone_gids)
+
     
     accuracy_history = []
     
@@ -311,13 +310,7 @@ def main():
             
         # update replay buffer
         replay_buffer_q.on_new_task(seen_plus_backbone)
-        print(f"\n=== REPLAY BUFFER UPDATE ===")
-        print(f"  Task {task_idx+1}: Added classes {new_gids}")
-        print(f"  Total seen classes: {seen_plus_backbone}")
-        print(f"  Replay buffer size: {len(replay_buffer_q)}")
-        print(f"  Replay buffer per class: {replay_buffer_q.counts_per_class()}")
-        print(f"  Replay buffer cap per class: {replay_buffer_q._cap}")
-                
+        replay_buffer_q.debug_summary(title=f"After on_new_task (Task {task_idx+1})")
         
         # 5) Create teacher snapshot over the previous classes for DDR/KD
         teacher = None  

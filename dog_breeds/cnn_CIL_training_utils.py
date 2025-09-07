@@ -8,6 +8,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 from utils import build_tensors
+import torch.nn.functional as F
 
 def load_CIL_data(CIL_dog_data, train_tf, val_tf, gid2breed=None, local_to_gid=None):
 
@@ -83,7 +84,7 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
         # Set backbone back to eval mode (it should stay frozen anyway)
         model.backbone.eval()
         model.proj.eval()
-
+            
         # ---- forward: live
         # Use projected features for head
         logits_live = model.head.forward_rows(proj_feats, rows_seen)
@@ -102,6 +103,16 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
                     dtype=torch.long, device=device
                 )
                 replay_loss = criterion(logits_replay, replay_local)
+                
+                
+        # ---- forward: importance metrics
+        with torch.no_grad():
+            probs = torch.softmax(logits_live, dim=1)
+            top2 = torch.topk(probs, k=2, dim=1).values   # [B, 2]
+            margin = (top2[:,0] - top2[:,1])              # lower = harder
+            entropy = -(probs * (probs.clamp_min(1e-8)).log()).sum(dim=1)
+            ce_i = F.cross_entropy(logits_live, batch_y_local, reduction='none')  # [B]  # implement CE per-sample
+            hardness = ce_i + (1.0 - margin) + 0.5 * entropy        # tune weights
         
         # Combine loss on replay and live        
         loss = live_loss + replay_loss if replay_loss is not None else live_loss
@@ -128,14 +139,14 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
             if W.grad is not None:
                 W.grad.mul_(model.head.mask)
         optimizer.step()
-
+        
         # apply mask every step! just to enforce
         with torch.no_grad():           
             W.mul_(model.head.mask)
         
         #------ add to replay
         global_targets = local_to_gid.to(device)[batch_y_local]  # vectorized: (B,) global IDs
-        replay_buffer_q.add_batch(backbone_feats, global_targets) # Store backbone features for replay    
+        replay_buffer_q.add_batch(backbone_feats, global_targets, raw_scores=hardness) # Store backbone features for replay, hardness metric    
 
         # stats
         with torch.no_grad():
@@ -151,8 +162,16 @@ def train_with_simplified_tdm(model, cfg, registry, teacher, prev_num,
                 'acc': f'{current_acc:.1f}%',
                 'loss': f'{current_loss:.3f}'
             })
+        if (step + 1) % 400 == 0:
+            replay_buffer_q.rebalance_to_cap()
+        if (step + 1) % 1000 == 0:
+            replay_buffer_q.debug_summary(title=f"Task {task_idx+1}, step {step+1}")
+
 
     print(f"epoch {epoch:02d} | train_acc={100*epoch_correct/epoch_total:.1f} | loss={epoch_loss/len(train_loader):.3f}")
+    replay_buffer_q.rebalance_to_cap()
+
+
 
         
 def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid, gid2breed=None):
@@ -188,7 +207,7 @@ def CIL_post_task_eval(test_loader, device, model, registry, local_to_gid, gid2b
         overall_acc = 100.0 * correct / max(total, 1)
         class_acc = {int(c): (100.0 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0.0) for c in range(num_local)}
         # Debugging 
-        print(f"[Debug] totals per class: {class_total}")
+        # print(f"[Debug] totals per class: {class_total}")
         
         return class_acc, overall_acc
     
