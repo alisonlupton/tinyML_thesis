@@ -1,0 +1,55 @@
+_wandb:
+    value:
+        cli_version: 0.20.1
+        m: []
+        python_version: 3.10.8
+        t:
+            "1":
+                - 1
+                - 41
+                - 49
+                - 51
+            "2":
+                - 1
+                - 41
+                - 49
+                - 51
+            "3":
+                - 13
+                - 16
+                - 55
+                - 61
+            "4": 3.10.8
+            "5": 0.20.1
+            "12": 0.20.1
+            "13": darwin-arm64
+backbone:
+    value: quicknet
+backbone_path:
+    value: models/quicknet_tinyimagenet_bestmodel.pth
+batch_size:
+    value:
+        test: 1000
+        train: 64
+dataset:
+    value: CIFAR10
+device:
+    value: cpu
+epochs:
+    value: 1
+live_batch:
+    value: 25
+model_folder:
+    value: models
+num_classes:
+    value: 10
+num_tasks:
+    value: 5
+project:
+    value: Master's Thesis
+replay_batch:
+    value: 100
+replay_buffer_size:
+    value: 1000
+wandb_activate:
+    value: true

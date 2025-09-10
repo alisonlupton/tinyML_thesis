@@ -1,0 +1,29 @@
+Stage,Behavior,Accuracy
+Backbone,Standing,91.35802469135803
+Backbone,Lying chest,98.70466321243524
+Backbone,Trotting,0.0
+Backbone,Sitting,98.567335243553
+Backbone,Galloping,0.0
+Backbone,Walking,99.62406015037594
+Backbone,Sniffing,0.0
+Task 1,Standing,0.0
+Task 1,Lying chest,0.0
+Task 1,Trotting,0.0
+Task 1,Sitting,0.0
+Task 1,Galloping,0.0
+Task 1,Walking,0.0
+Task 1,Sniffing,100.0
+Task 2,Standing,0.0
+Task 2,Lying chest,0.0
+Task 2,Trotting,100.0
+Task 2,Sitting,0.0
+Task 2,Galloping,0.0
+Task 2,Walking,0.0
+Task 2,Sniffing,2.34375
+Task 3,Standing,0.0
+Task 3,Lying chest,0.0
+Task 3,Trotting,0.0
+Task 3,Sitting,0.0
+Task 3,Galloping,100.0
+Task 3,Walking,0.0
+Task 3,Sniffing,3.3854166666666665

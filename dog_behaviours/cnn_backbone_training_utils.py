@@ -1,4 +1,4 @@
-# cnn_backbone_training_utils.py
+#cnn_backbone_training_utils.py
 import torch 
 import numpy as np 
 from dataclasses import dataclass
@@ -23,45 +23,45 @@ def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_be
         dog_X = dog_data[dog_id]['X']
         dog_y = dog_data[dog_id]['y']
         
-        # Only include backbone behaviors
+        #Only include backbone behaviors
         mask = torch.isin(dog_y, gids_backbone)
         
-        # if no backbone behaviors ignore
+        #if no backbone behaviors ignore
         if not mask.any():
             continue
         
         backbone_X_list.append(dog_X[mask])
-        backbone_y_list.append(map_backbone[dog_y[mask]])   # vectorized remap to 0..K-1
+        backbone_y_list.append(map_backbone[dog_y[mask]])   #vectorized remap to 0..K-1
 
     
     if len(backbone_X_list) == 0:
         print("No backbone training data found!")
         return
     
-    backbone_X = torch.cat(backbone_X_list, dim=0)     # (Ntr, C, L)
-    backbone_y = torch.cat(backbone_y_list, dim=0)     # (Ntr,)
+    backbone_X = torch.cat(backbone_X_list, dim=0)     #(Ntr, C, L)
+    backbone_y = torch.cat(backbone_y_list, dim=0)     #(Ntr,)
     
     
-    # Compute std and mean from TRAIN only
+    #Compute std and mean from TRAIN only
     X_train_np = backbone_X.numpy()
     y_train_np = backbone_y.numpy()
     train_mean, train_std = compute_normalization_stats(X_train_np)
     
-    # Normalize
+    #Normalize
     X_train_np = normalize_features(X_train_np, train_mean, train_std)
     X_train = torch.from_numpy(X_train_np).float()
     y_train = torch.from_numpy(y_train_np).long()
 
     
-    # Get separate validation dog data
+    #Get separate validation dog data
     if validation_dog not in dog_data:
         print(f"Validation dog {validation_dog} not found!")
         return
     
-    val_X_np = dog_data[validation_dog]['X'].numpy()  # (N, C, L)
-    val_y_np = dog_data[validation_dog]['y'].numpy()  # (N,) global IDs
+    val_X_np = dog_data[validation_dog]['X'].numpy()  #(N, C, L)
+    val_y_np = dog_data[validation_dog]['y'].numpy()  #(N,) global IDs
 
-    # Filter to backbone classes, then vectorized remap
+    #Filter to backbone classes, then vectorized remap
     val_mask = np.isin(val_y_np, gids_backbone.numpy())
     val_X_np = val_X_np[val_mask]
     val_y_np = map_backbone[torch.from_numpy(val_y_np[val_mask]).long()].numpy()
@@ -71,7 +71,7 @@ def load_data_cnn_backbone(backbone_dogs, dog_data, behavior_to_idx, backbone_be
         count = (val_y_np == i).sum()
         print(f"  {cls}: {count} samples")
 
-    # normalize using *training* stats
+    #normalize using *training* stats
     val_X_np = normalize_features(val_X_np, train_mean, train_std)
 
     X_val = torch.from_numpy(val_X_np).float()
@@ -89,7 +89,7 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
     epochs = cfg['backbone_epochs']
     
     for epoch in range(epochs):
-        # Training phase
+        #Training phase
         backbone_model.train()
         train_loss = 0
         train_correct = 0
@@ -109,7 +109,7 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
             train_total += y_batch.size(0)
             train_correct += (predicted == y_batch).sum().item()
         
-        # Validation phase
+        #Validation phase
         backbone_model.eval()
         val_loss = 0
         val_correct = 0
@@ -127,16 +127,16 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
                 val_total += y_batch.size(0)
                 val_correct += (predicted == y_batch).sum().item()
         
-        # Calculate accuracies
+        #Calculate accuracies
         train_acc = 100 * train_correct / train_total
         val_acc = 100 * val_correct / val_total
         
-        # Track metrics with plotter if provided
+        #Track metrics with plotter if provided
         if plotter is not None:
             plotter.add_backbone_epoch(epoch, train_loss/len(backbone_train_loader), 
                                      val_loss/len(backbone_val_loader), train_acc, val_acc)
         
-        # Track best validation accuracy
+        #Track best validation accuracy
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             counter = 0
@@ -158,7 +158,7 @@ def train_cnn_backbone(backbone_model, backbone_behaviors, backbone_optimizer, b
 
     print(f"\n--- BACKBONE VALIDATION PER-CLASS ACCURACY ---")
     backbone_model.eval()
-    # Print per-class validation accuracy for backbone
+    #Print per-class validation accuracy for backbone
     val_class_correct = {cls: 0 for cls in backbone_behaviors}
     val_class_total = {cls: 0 for cls in backbone_behaviors}
     

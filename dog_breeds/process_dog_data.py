@@ -1,4 +1,4 @@
-# process_dog_data.py
+#process_dog_data.py
 
 import yaml
 from pathlib import Path
@@ -43,13 +43,13 @@ def create_tasks(cfg, all_gids, backbone_training_dogs):
     return [remaining[i*K:(i+1)*K] for i in range(num_tasks)]
 
 
-##---------- MAIN FUNCTION 
+##---------- MAIN FUNCTION
 def process_dog_data(cfg):
     
     """Create task semantics"""
     print("Starting processing of dog breed data into tasks...")
 
-    # Load indexed data
+    #Load indexed data
     index_json = cfg['cleaned_data_path_json']
     out_dir = Path(cfg['tasks_dir'])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -71,7 +71,7 @@ def process_dog_data(cfg):
         print(f"Task {idx}, GID: {task[0]}, BREED: {gid2breed[str(task[0])]}") 
     
   
-    # Save metadata/summary
+    #Save metadata/summary
     meta = {
         "dogs_per_task": cfg["num_cil_dogs_per_task"],
         "backbone_dogs": backbone_dogs,

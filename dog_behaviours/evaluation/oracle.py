@@ -1,4 +1,4 @@
-# build_oracle_baselines.py
+#build_oracle_baselines.py
 import os, glob, re, json
 import numpy as np
 import torch
@@ -16,9 +16,9 @@ def _acc(logits, y):
     return (logits.argmax(1) == y).float().mean().item() * 100.0
 
 def _prep_feats(t):
-    X = t["feats"]  # [N, C] or [N, C, T]
-    if X.dim() == 3:         # e.g., [N, 32, 25]
-        X = X.mean(dim=2)    # GAP to [N, 32]
+    X = t["feats"]  #[N, C] or [N, C, T]
+    if X.dim() == 3:         #e.g., [N, 32, 25]
+        X = X.mean(dim=2)    #GAP to [N, 32]
     elif X.dim() > 2:
         X = X.view(X.size(0), -1)
     y_g = t["y_global"]
@@ -34,9 +34,13 @@ def main(train_path="train_feats.pt", test_path="test_feats.pt", mask_dir="task_
     Xtr, ytr_g, m_all = _prep_feats(ttr)
     Xte, yte_g, _     = _prep_feats(tte)
 
-    # collect task masks
+    #collect task masks (use full masks, not _new masks for proper Intransigence calculation)
     train_masks = sorted(glob.glob(os.path.join(mask_dir, "mask_train_T*.npy")), key=_task_idx)
     test_masks  = sorted(glob.glob(os.path.join(mask_dir, "mask_T*.npy")),        key=_task_idx)
+    
+    #Filter out _new masks to use only full cumulative masks
+    train_masks = [m for m in train_masks if '_new' not in m]
+    test_masks  = [m for m in test_masks if '_new' not in m]
     assert len(train_masks) == len(test_masks) > 0
 
     oracle = {}
@@ -49,14 +53,14 @@ def main(train_path="train_feats.pt", test_path="test_feats.pt", mask_dir="task_
         Xte_k = Xte[mte]
         yte_g_k = yte_g[mte]
 
-        # build local labels 0..(Ck-1) for this task
+        #build local labels 0..(Ck-1) for this task
         uniq = torch.unique(ytr_g_k)
-        # map globals to local
+        #map globals to local
         g2l = {int(g): i for i, g in enumerate(uniq.tolist())}
         ytr_loc = torch.tensor([g2l[int(g)] for g in ytr_g_k.tolist()], dtype=torch.long)
         yte_loc = torch.tensor([g2l[int(g)] for g in yte_g_k.tolist() if int(g) in g2l], dtype=torch.long)
 
-        # filter Xte_k to keep only samples whose globals exist in train uniq
+        #filter Xte_k to keep only samples whose globals exist in train uniq
         keep = torch.tensor([int(g) in g2l for g in yte_g_k.tolist()], dtype=torch.bool)
         Xte_k, yte_loc = Xte_k[keep], yte_loc
 

@@ -1,0 +1,44 @@
+{
+  "os":  "macOS-14.2.1-arm64-arm-64bit",
+  "python":  "CPython 3.10.8",
+  "startedAt":  "2025-07-29T10:58:52.342858Z",
+  "program":  "/Users/alisonlupton/Desktop/thesis_code/baseline_6/main.py",
+  "codePath":  "baseline_6/main.py",
+  "git":  {
+    "remote":  "git@github-personal:alisonlupton/tinyML_thesis.git",
+    "commit":  "ecaae84f2f19d70511e64c9c4b09605c05c5647a"
+  },
+  "email":  "alisonlup@gmail.com",
+  "root":  "/Users/alisonlupton/Desktop/thesis_code/baseline_6",
+  "host":  "Alisons-Air-7",
+  "executable":  "/Users/alisonlupton/Desktop/thesis_code/.venv/bin/python",
+  "codePathLocal":  "main.py",
+  "cpu_count":  8,
+  "cpu_count_logical":  8,
+  "disk":  {
+    "/":  {
+      "total":  "245107195904",
+      "used":  "232864833536"
+    },
+    "/System/Volumes/Data":  {
+      "total":  "245107195904",
+      "used":  "232864833536"
+    }
+  },
+  "memory":  {
+    "total":  "8589934592"
+  },
+  "cpu":  {
+    "count":  8,
+    "countLogical":  8
+  },
+  "apple":  {
+    "name":  "Apple M1",
+    "ecpuCores":  4,
+    "pcpuCores":  4,
+    "gpuCores":  7,
+    "memoryGb":  8,
+    "swapTotalBytes":  "6442450944",
+    "ramTotalBytes":  "8589934592"
+  }
+}

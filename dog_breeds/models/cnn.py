@@ -1,4 +1,4 @@
-# smaller_good_model.py
+#smaller_good_model.py
 import torch.nn as nn
 from .cnn_head import ClassRegistry, SimplifiedTDMHead
 
@@ -26,23 +26,23 @@ class TunedMCUStudentCNN(nn.Module):
     def __init__(self, in_channels=3, feat_dim=128, num_classes=10, img_size=160):
         super().__init__()
 
-        # Create backbone as a single Sequential (this is what Colab code expects)
+        #Create backbone as a single Sequential (this is what Colab code expects)
         self.backbone = nn.Sequential(
-            # Stage 1: 160 -> 80 (stride=2)  [no pool here]
-            CBR3(in_channels, 32, stride=2),  # downsample early
-            CBR1(32, 32),                     # 1x1 instead of second 3x3
+            #Stage 1: 160 -> 80 (stride=2) [no pool here]
+            CBR3(in_channels, 32, stride=2),  #downsample early
+            CBR1(32, 32),                     #1x1 instead of second 3x3
             
-            # Stage 2: 80 -> 40
+            #Stage 2: 80 -> 40
             CBR3(32, 64, stride=1),
             CBR1(64, 64),
             nn.MaxPool2d(2, 2),
             
-            # Stage 3: 40 -> 20
+            #Stage 3: 40 -> 20
             CBR3(64, 128, stride=1),
             CBR1(128, 128),
             nn.MaxPool2d(2, 2),
             
-            # Stage 4: 20 -> 10  (slight width bump to help accuracy)
+            #Stage 4: 20 -> 10 (slight width bump to help accuracy)
             CBR3(128, 160, stride=1),
             CBR1(160, 160),
             nn.MaxPool2d(2, 2),
@@ -65,14 +65,14 @@ class TunedMCUStudentCNN(nn.Module):
 
     def _features(self, x):
         x = self.backbone(x)
-        x = self.gap(x).flatten(1)  # (N, 160)
+        x = self.gap(x).flatten(1)  #(N, 160)
         return x
 
     def forward(self, x):
         feats = self._features(x)
-        z = self.proj(feats)             # (N, feat_dim)
-        logits = self.classifier(z)      # (N, num_classes)
-        return logits, z  # Return both logits and projected features for distillation
+        z = self.proj(feats)             #(N, feat_dim)
+        logits = self.classifier(z)      #(N, num_classes)
+        return logits, z  #Return both logits and projected features for distillation
 
 
 class TunedMCUStudentCNN_CIL(nn.Module):
@@ -85,23 +85,23 @@ class TunedMCUStudentCNN_CIL(nn.Module):
         super().__init__()
         self.device = device
 
-        # ---- Backbone (exact same as TunedMCUStudentCNN) ----
+        #---- Backbone (exact same as TunedMCUStudentCNN) ----
         self.backbone = nn.Sequential(
-            # Stage 1: 160 -> 80 (stride=2)  [no pool here]
-            CBR3(in_channels, 32, stride=2),  # downsample early
-            CBR1(32, 32),                     # 1x1 instead of second 3x3
+            #Stage 1: 160 -> 80 (stride=2) [no pool here]
+            CBR3(in_channels, 32, stride=2),  #downsample early
+            CBR1(32, 32),                     #1x1 instead of second 3x3
             
-            # Stage 2: 80 -> 40
+            #Stage 2: 80 -> 40
             CBR3(32, 64, stride=1),
             CBR1(64, 64),
             nn.MaxPool2d(2, 2),
             
-            # Stage 3: 40 -> 20
+            #Stage 3: 40 -> 20
             CBR3(64, 128, stride=1),
             CBR1(128, 128),
             nn.MaxPool2d(2, 2),
             
-            # Stage 4: 20 -> 10  (slight width bump to help accuracy)
+            #Stage 4: 20 -> 10 (slight width bump to help accuracy)
             CBR3(128, 160, stride=1),
             CBR1(160, 160),
             nn.MaxPool2d(2, 2),
@@ -109,10 +109,10 @@ class TunedMCUStudentCNN_CIL(nn.Module):
 
         self.gap = nn.AdaptiveAvgPool2d(1)
 
-        # Projection (same as TunedMCUStudentCNN)
+        #Projection (same as TunedMCUStudentCNN)
         self.proj = nn.Sequential(nn.Dropout(0.20), nn.Linear(160, feat_dim))
 
-        # CIL head with TDM
+        #CIL head with TDM
         self.head = SimplifiedTDMHead(feat_dim, init_num_classes, device, sparsity_ratio)
 
         self._init_weights()
@@ -126,21 +126,21 @@ class TunedMCUStudentCNN_CIL(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
 
-    # ---- shared feature path ----
+    #---- shared feature path ----
     def _features(self, x):
         """
         x: (N, C, H, W) with H=W=160 typically
         Return pre-projection backbone features, shape (N, 160).
-        Downsample path: 160→80 (stride2) →40→20→10 (×16 total), then GAP.
+        Downsample path: 16080 (stride2) 402010 (16 total), then GAP.
         """
-        h = self.backbone(x)        # (N, 160, 10, 10) for 160x160 input
-        h = self.gap(h).flatten(1)  # (N, 160)
+        h = self.backbone(x)        #(N, 160, 10, 10) for 160x160 input
+        h = self.gap(h).flatten(1)  #(N, 160)
         return h
 
-    # ---- standard forwards used in your pipeline ----
+    #---- standard forwards used in pipeline ----
     def forward(self, x):
         feats = self._features(x)
-        z = self.proj(feats)                  # (N, feat_dim)
+        z = self.proj(feats)                  #(N, feat_dim)
         rows = list(range(self.head.out_dim))
         return self.head.forward_rows(z, rows)
 

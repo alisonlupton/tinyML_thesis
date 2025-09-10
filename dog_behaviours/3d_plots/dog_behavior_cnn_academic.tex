@@ -1,189 +1,131 @@
-\documentclass[border=8pt]{article}
+\documentclass{article}
+\usepackage[paperwidth=8in,paperheight=4in,margin=0.1in]{geometry}
+\pagestyle{empty}
+\usepackage{amsfonts}
 \usepackage{tikz}
-\usepackage{geometry}
-\geometry{margin=0.2cm, paperwidth=20cm, paperheight=8cm}
-\usetikzlibrary{positioning}
-\usetikzlibrary{shapes.geometric}
-\usetikzlibrary{shadows}
+\usetikzlibrary{positioning,calc,arrows.meta,decorations.pathreplacing,shadows,shapes.geometric,shapes.symbols}
 
-% Define colors
+% ==== Colors ====
 \definecolor{frozenblue}{RGB}{100,150,200}
 \definecolor{trainableyellow}{RGB}{255,200,100}
 \definecolor{replaygreen}{RGB}{100,200,100}
 \definecolor{outputpurple}{RGB}{200,100,200}
+\definecolor{featgrey}{RGB}{230,230,230}
 
-% Define Box style (3D box)
+% ==== 3D Box style ( existing pic) ====
 \tikzset{
-    Box/.pic={
-        \tikzset{/boxblock/.cd,#1}
-        \tikzstyle{box}=[every edge/.append style={pic actions, densely dashed, opacity=.7},fill opacity=\opacity, pic actions,fill=\fill]
-        
-        \pgfmathsetmacro{\y}{\cubey*\scale}
-        \pgfmathsetmacro{\z}{\cubez*\scale}
-        \pgfmathsetmacro{\x}{\cubex*\scale}
-        
-        % Draw 3D box
-        \coordinate (a) at (0, \y/2, \z/2);
-        \coordinate (b) at (0,-\y/2, \z/2);
-        \coordinate (c) at (\x,-\y/2, \z/2);
-        \coordinate (d) at (\x, \y/2, \z/2);
-        \coordinate (e) at (\x, \y/2,-\z/2);
-        \coordinate (f) at (\x,-\y/2,-\z/2);
-        \coordinate (g) at (0,-\y/2,-\z/2);
-        \coordinate (h) at (0, \y/2,-\z/2);
-        
-        % Draw faces
-        \draw [box] (d) -- (a) -- (b) -- (c) -- cycle; % front
-        \draw [box] (d) -- (e) -- (f) -- (c) -- cycle; % right
-        \draw [box] (d) -- (a) -- (h) -- (e) -- cycle; % top
-        \draw [box] (b) -- (g) -- (f) -- (c) -- cycle; % bottom
-        \draw [box] (a) -- (h) -- (g) -- (b) -- cycle; % left
-        \draw [box] (h) -- (e) -- (f) -- (g) -- cycle; % back
-        
-        % Captions added manually after replay buffer
-        
-        % Define connection points
-        \coordinate (\name-west) at (0,0,0);
-        \coordinate (\name-east) at (\x,0,0);
-        \coordinate (\name-north) at (\x/2,\y/2,0);
-        \coordinate (\name-south) at (\x/2,-\y/2,0);
-        \coordinate (\name-center) at (\x/2,0,0);
-    },
-    /boxblock/.search also={/tikz},
-    /boxblock/.cd,
-    width/.store in=\cubex,
-    height/.store in=\cubey,
-    depth/.store in=\cubez,
-    scale/.store in=\scale,
-    caption/.store in=\caption,
-    name/.store in=\name,
-    fill/.store in=\fill,
-    opacity/.store in=\opacity,
-    captionoffset/.store in=\captionoffset,
-    fill={rgb:red,5;green,5;blue,5;white,15},
-    opacity=0.8,
-    width=2,
-    height=13,
-    depth=15,
-    scale=.2,
-    caption=,
-    name=,
-    captionoffset=1.2,
+  Box/.pic={
+    \tikzset{/boxblock/.cd,#1}
+    \tikzstyle{box}=[every edge/.append style={pic actions, densely dashed, opacity=.6},
+                     fill opacity=\opacity, pic actions,fill=\fill]
+    \pgfmathsetmacro{\y}{\cubey*\scale}
+    \pgfmathsetmacro{\z}{\cubez*\scale}
+    \pgfmathsetmacro{\x}{\cubex*\scale}
+    \coordinate (a) at (0, \y/2, \z/2);
+    \coordinate (b) at (0,-\y/2, \z/2);
+    \coordinate (c) at (\x,-\y/2, \z/2);
+    \coordinate (d) at (\x, \y/2, \z/2);
+    \coordinate (e) at (\x, \y/2,-\z/2);
+    \coordinate (f) at (\x,-\y/2,-\z/2);
+    \coordinate (g) at (0,-\y/2,-\z/2);
+    \coordinate (h) at (0, \y/2,-\z/2);
+    \draw [box] (d) -- (a) -- (b) -- (c) -- cycle; % front
+    \draw [box] (d) -- (e) -- (f) -- (c) -- cycle; % right
+    \draw [box] (d) -- (a) -- (h) -- (e) -- cycle; % top
+    \draw [box] (b) -- (g) -- (f) -- (c) -- cycle; % bottom
+    \draw [box] (a) -- (h) -- (g) -- (b) -- cycle; % left
+    \draw [box] (h) -- (e) -- (f) -- (g) -- cycle; % back
+    \coordinate (\name-west)   at (0,0,0);
+    \coordinate (\name-east)   at (\x,0,0);
+    \coordinate (\name-north)  at (\x/2,\y/2,0);
+    \coordinate (\name-south)  at (\x/2,-\y/2,0);
+    \coordinate (\name-center) at (\x/2,0,0);
+  },
+  /boxblock/.search also={/tikz},
+  /boxblock/.cd,
+  width/.store in=\cubex,
+  height/.store in=\cubey,
+  depth/.store in=\cubez,
+  scale/.store in=\scale,
+  caption/.store in=\caption,
+  name/.store in=\name,
+  fill/.store in=\fill,
+  opacity/.store in=\opacity,
+  fill={rgb:red,5;green,5;blue,5;white,15},
+  opacity=0.9,
+  width=2,height=12,depth=14,scale=.25,
+  caption=,name=,
 }
 
 \begin{document}
-\begin{tikzpicture}[scale=1.0]
+\centering
+\begin{tikzpicture}[>=Latex, line width=0.7pt, font=\sffamily]
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Forward Pass (Top Section)
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% small white-backed label
+\tikzset{wb/.style={font=\scriptsize, fill=white, inner sep=1pt, rounded corners=2pt, text=black}}
 
-% Title
-\node[font=\large\bfseries] at (0, 6) {Forward Pass};
+% -----------------------------------------
+% Compact backbone (frozen) — closer spacing
+% -----------------------------------------
+\pic at (-4.8,2.6) {Box={name=input,fill=featgrey,width=0.9,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of input-south] {Input};
 
-% Input (proportional to 12×100)
-\pic[shift={(0,0,0)}] at (0,4.5) {Box={name=input,%
-        caption={},%
-        fill=gray!20,opacity=0.8,width=1.2,height=10,depth=8,scale=0.2}};
+\pic at (-3.5,2.6) {Box={name=conv1,fill=frozenblue,width=1.2,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of conv1-south] {Conv1D};
 
-% Frozen Layers Section (much closer together, proportional)
-\pic[shift={(0,0,0)}] at (1.8,4.5) {Box={name=conv1,%
-        caption={},%
-        fill=frozenblue,opacity=0.8,width=1.6,height=8,depth=8,scale=0.2}};
+\pic at (-2.1,2.6) {Box={name=conv2,fill=frozenblue,width=1.6,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of conv2-south] {Conv1D};
 
-\pic[shift={(0,0,0)}] at (3.6,4.5) {Box={name=conv2,%
-        caption={},%
-        fill=frozenblue,opacity=0.8,width=3.2,height=8,depth=8,scale=0.2}};
+\pic at (-0.6,2.6) {Box={name=gap,fill=frozenblue,width=0.9,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of gap-south] {GAP};
 
-\pic[shift={(0,0,0)}] at (6.0,4.5) {Box={name=gap,%
-        caption={},%
-        fill=frozenblue,opacity=0.8,width=1.0,height=8,depth=8,scale=0.2}};
+\pic at (0.8,2.6) {Box={name=feat,fill=featgrey,width=1.6,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of feat-south] {32-D};
 
-\pic[shift={(0,0,0)}] at (7.2,4.5) {Box={name=features,%
-        caption={},%
-        fill=frozenblue,opacity=0.8,width=3.2,height=8,depth=8,scale=0.2}};
+% arrows + one dim label
+\draw[->] (input-east) -- (conv1-west) node[midway,above,wb] {$C{\times}L$};
+\draw[->] (conv1-east) -- (conv2-west);
+\draw[->] (conv2-east) -- (gap-west);
+\draw[->] (gap-east) -- (feat-west);
 
-% Frozen layers bracket and arrow removed for cleaner look
+% frozen brace
+\draw[decorate,decoration={brace,amplitude=5pt},yshift=6pt]
+  ($(conv1-north)+(0,0.1)$) -- node[above=6pt,wb] {Frozen Backbone} ($(gap-north)+(0,0.1)$);
 
-% Trainable Layers Section (much closer together, proportional)
-\pic[shift={(0,0,0)}] at (10.8,4.5) {Box={name=head,%
-        caption={},%
-        fill=trainableyellow,opacity=0.8,width=3.2,height=8,depth=8,scale=0.2}};
+% -----------------------------------------
+% Adaptive head (trainable) — minimal text
+% -----------------------------------------
+\pic at (3.1,2.6) {Box={name=head,fill=trainableyellow,width=1.9,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of head-south] {Adaptive head};
 
-\pic[shift={(0,0,0)}] at (14.4,4.5) {Box={name=output,%
-        caption={},%
-        fill=outputpurple,opacity=0.8,width=7.0,height=8,depth=8,scale=0.2}};
+% small "grows" hint (very minimal)
+\draw[dashed,trainableyellow!70!black,rounded corners=1pt]
+  ($(head-east)+(0.05,0.35)$) rectangle ++(0.6,0.6);
 
-% Trainable layers bracket and arrow removed for cleaner look
+\pic at (5.3,2.6) {Box={name=out,fill=outputpurple,width=2.4,height=8,depth=8,scale=0.25}};
+\node[wb,below=2pt of out-south] {Logits};
 
-% Forward arrows with dimension labels
-\draw[->, thick] (input-east) -- (conv1-west);
-\node[font=\small, color=black] at (0.9, 5.2) {12×100};
+\draw[->] (feat-east) -- (head-west) node[midway,above,wb] {$32 \!\rightarrow\! K(t)$};
+\draw[->] (head-east) -- (out-west);
 
-\draw[->, thick] (conv1-east) -- (conv2-west);
-\node[font=\small, color=black] at (2.7, 5.2) {12→16};
+% trainable brace (compact)
+\draw[decorate,decoration={brace,amplitude=5pt},yshift=6pt]
+  ($(head-north)+(0,0.1)$) -- node[above=6pt,wb] {Trainable} ($(out-north)+(0,0.1)$);
 
-\draw[->, thick] (conv2-east) -- (gap-west);
-\node[font=\small, color=black] at (4.8, 5.2) {16→32};
+% -----------------------------------------
+% Replay buffer (INT8) — 3D cylinder, clearly labeled
+% -----------------------------------------
+\node[cylinder, draw=black, cylinder uses custom fill,
+      shape border rotate=90,
+      minimum width=1.5cm, minimum height=0.7cm,
+      aspect=0.32, fill=replaygreen, opacity=0.9] (replay) at (1.2,0.2) {};
+\node[wb,below=2pt of replay.south] {Replay buffer (INT8)};
 
-\draw[->, thick] (gap-east) -- (features-west);
-\node[font=\small, color=black] at (6.6, 5.2) {32-dim};
+% store / retrieve arrows (simple, readable)
+\draw[->,thick] ($(feat-south)+(0,-0.02)$) -- ($(replay.north)+(0,0.03)$)
+  node[midway,right=1pt,wb] {store};
 
-\draw[->, thick] (features-east) -- (head-west);
-\node[font=\small, color=black] at (9.0, 5.2) {32→7};
-
-\draw[->, thick] (head-east) -- (output-west);
-\node[font=\small, color=black] at (12.6, 5.2) {7 classes};
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Replay Buffer (Side Section)
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-% Replay Buffer (3D disk, smaller, bottom left)
-\pic[shift={(0,0,0)}] at (2,1.5) {Box={name=replay,%
-        caption={Replay\\Buffer},%
-        fill=replaygreen,opacity=0.8,width=1.5,height=8,depth=8,scale=0.2}};
-
-% Replay connections (to bottom left)
-\draw[<->, thick, green!70!black] (features-south) -- (replay-north);
-\draw[<->, thick, green!70!black] (head-south) -- (replay-north);
-
-% Replay labels
-\node[font=\tiny, color=green!70!black] at (8.2, 3.2) {Store};
-\node[font=\tiny, color=green!70!black] at (10.8, 3.2) {Retrieve};
-
-% INT8 transformation removed - keeping it simple
-
-% Add layer names just above the boxes (larger text)
-\node[font=\small, color=black] at (0, 3.2) {Input};
-\node[font=\small, color=black] at (1.8, 3.2) {Conv1D};
-\node[font=\small, color=black] at (3.6, 3.2) {Conv1D};
-\node[font=\small, color=black] at (6.0, 5.7) {GAP};
-\node[font=\small, color=black] at (7.5, 5.7) {Features};
-\node[font=\small, color=black] at (10.8, 5.6) {TDM Head};
-\node[font=\small, color=black] at (14.4, 5.6) {Softmax};
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Backward Pass (Bottom Section)
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-% Title (removed - gradients are shown by arrows above)
-
-% Backward arrows (only for trainable layers)
-% \draw[<-, thick, purple!70!black] (head-south) -- ++(0, -0.8);
-% \draw[<-, thick, purple!70!black] (output-south) -- ++(0, -0.8);
-
-% Gradient labels removed - arrows are self-explanatory
-
-% Frozen layers note removed for cleaner look
-
-% Legend removed - colors are self-explanatory
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Precision Constraint
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-% Precision constraint removed for cleaner look
-
+\draw[->,thick] ($(replay.north)+(0,0.03)$) .. controls +(1.0,1.5) and +(-1.0,-1.5) .. ($(head-south)+(0,-0.02)$)
+  node[midway,right=2pt,wb] {retrieve};
 \end{tikzpicture}
 \end{document}

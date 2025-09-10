@@ -49,6 +49,7 @@ cil_tasks:
     ],
   ]
 
+
 # Backbone training
 backbone_learning_rate: 0.001
 backbone_weight_decay: 0.0001
@@ -59,6 +60,9 @@ backbone_sparsity_ratio: 0.0
 
 # CIL training
 buffer_size: 5000
+replay: True
+adaptive_head: True
+teacher: True
 sparsity_ratio: 0.3
 CIL_batch_size_train: 1
 replay_batch_size: 1 # tends to match the live batch size, but can tune this

@@ -1,4 +1,4 @@
-# cnn_backbone_training_utils.py
+#cnn_backbone_training_utils.py
 import torch
 import copy
 import torch.nn as nn
@@ -26,25 +26,25 @@ class BackboneData:
     
 def _make_transforms(cfg):
     img = cfg['img_size']
-    mean, std = cfg['mean_tf'], cfg['std_tf']  # from teacher meta
+    mean, std = cfg['mean_tf'], cfg['std_tf']  #from teacher meta
 
-    # === Inference / Validation (match offline "deploy_tf_strong") ===
+    #=== Inference / Validation (match offline "deploy_tf_strong") ===
     deploy_tf = transforms.Compose([
-        transforms.Resize(int(round(1.10*img)), interpolation=I.BILINEAR),  # e.g., 176 for 160
-        transforms.CenterCrop(img),                 # 160x160
+        transforms.Resize(int(round(1.10*img)), interpolation=I.BILINEAR),  #e.g., 176 for 160
+        transforms.CenterCrop(img),                 #160x160
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
-    # === Backbone/distill/replay (no aug) ===
+    #=== Backbone/distill/replay (no aug) ===
     backbone_train_tf = deploy_tf
     
     
-    # === CIL on-device training (lite aug) ===
-    # Cheap: tiny translate via RandomCrop + optional flip
+    #=== CIL on-device training (lite aug) ===
+    #Cheap: tiny translate via RandomCrop + optional flip
     CIL_train_tf = transforms.Compose([
-        transforms.Resize(int(round(1.05*img)), interpolation=I.BILINEAR),  # smaller upsample than deploy to save a bit
-        transforms.RandomCrop(img),                 # cheap spatial jitter
-        transforms.RandomHorizontalFlip(p=0.5),     # essentially free
+        transforms.Resize(int(round(1.05*img)), interpolation=I.BILINEAR),  #smaller upsample than deploy to save a bit
+        transforms.RandomCrop(img),                 #cheap spatial jitter
+        transforms.RandomHorizontalFlip(p=0.5),     #essentially free
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
@@ -55,7 +55,7 @@ def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
     
     backbone_df = dog_data[dog_data["gid"].isin(backbone_dogs)].copy()
 
-    # Stable local label mapping (0..B-1)
+    #Stable local label mapping (0..B-1)
     local_ids = sorted(backbone_dogs)
     gid_to_local = {g:i for i,g in enumerate(local_ids)}
     backbone_df["local"] = [gid_to_local[int(g)] for g in backbone_df["gid"].tolist()]
@@ -77,8 +77,8 @@ def load_data_cnn_backbone(cfg, backbone_dogs, dog_data):
 @torch.no_grad()
 def eval_new_classes_on_backbone(
     model,
-    train_loader,       # use deploy_tf here for fair comparison
-    test_loader,        # use deploy_tf here too
+    train_loader,       #use deploy_tf here for fair comparison
+    test_loader,        #use deploy_tf here too
     device,
     num_classes=None,
     use_proj=True,
@@ -92,12 +92,12 @@ def eval_new_classes_on_backbone(
     model.eval()
 
     def feat_fn(x):
-        f = model._features(x)                  # (N, 160) — will be quantized path if you attached it
+        f = model._features(x)                  #(N, 160) will be quantized path if attached it
         if use_proj and hasattr(model, "proj"):
-            f = model.proj(f)                   # (N, feat_dim); Dropout off in eval()
+            f = model.proj(f)                   #(N, feat_dim); Dropout off in eval()
         return torch.nn.functional.normalize(f, dim=1)
 
-    # --- Build prototypes on TRAIN (deterministic transforms) ---
+    #--- Build prototypes on TRAIN (deterministic transforms) ---
     sums, counts, D = {}, {}, None
     for xb, yb in train_loader:
         xb, yb = xb.to(device), yb.to(device)
@@ -122,7 +122,7 @@ def eval_new_classes_on_backbone(
             seen[c] = True
     protos = torch.nn.functional.normalize(protos, dim=1)
 
-    # --- Classify TEST by cosine to prototypes ---
+    #--- Classify TEST by cosine to prototypes ---
     total = correct = 0
     cls_tot = [0] * num_classes
     cls_cor = [0] * num_classes
@@ -153,21 +153,21 @@ def eval_new_classes_on_backbone(
 
 def eval_on_fixed_gids(
     model,
-    loader,                 # yields (xb, y_local) where y_local ∈ [0..len(fixed_gids)-1]
-    registry,               # ClassRegistry that *may* know only a subset of fixed_gids
-    fixed_gids,             # list[int] — global IDs in the same order used to build y_local
+    loader,                 #yields (xb, y_local) where y_local [0..len(fixed_gids)-1]
+    registry,               #ClassRegistry that *may* know only a subset of fixed_gids
+    fixed_gids,             #list[int] global IDs in the same order used to build y_local
     device,
 ):
     """
     Evaluate with the TDM head on a fixed set of global IDs (gids), even if some
-    of them are unseen. For unseen gids, logits are set to -inf so they can’t win.
+    of them are unseen. For unseen gids, logits are set to -inf so they cant win.
     Returns: overall %, {gid: acc%}
     """
     model.eval()
 
-    # Map fixed gids -> current head rows (or -1 if unseen)
+    #Map fixed gids -> current head rows (or -1 if unseen)
     rows = []
-    known_cols = []   # columns (in fixed_gids order) that are known
+    known_cols = []   #columns (in fixed_gids order) that are known
     for col, g in enumerate(fixed_gids):
         if int(g) in registry.row_for_gid:
             rows.append(registry.row_for_gid[int(g)])
@@ -182,27 +182,27 @@ def eval_on_fixed_gids(
     for xb, y_local in loader:
         xb = xb.to(device); y_local = y_local.to(device)
 
-        # features → proj (match your training path)
+        #features proj (match training path)
         model.backbone.eval(); model.proj.eval()
         feats = model._features(xb)
         z = model.proj(feats)
 
-        # Allocate full logits [B, K] where K=len(fixed_gids)
+        #Allocate full logits [B, K] where K=len(fixed_gids)
         B, K = z.size(0), len(fixed_gids)
-        logits_full = torch.full((B, K), -1e9, device=device)  # -inf for unseen columns
+        logits_full = torch.full((B, K), -1e9, device=device)  #-inf for unseen columns
 
-        # If we have any known rows, compute them and place into their columns
+        #If we have any known rows, compute them and place into their columns
         if len(known_cols) > 0:
             known_rows = [r for r in rows if r >= 0]
-            logits_known = model.head.forward_rows(z, known_rows)  # [B, |known|]
+            logits_known = model.head.forward_rows(z, known_rows)  #[B, |known|]
             logits_full[:, known_cols] = logits_known
 
-        pred_local = logits_full.argmax(dim=1)  # predictions in *local-to-fixed* index space
+        pred_local = logits_full.argmax(dim=1)  #predictions in *local-to-fixed* index space
 
         total += y_local.size(0)
         correct += (pred_local == y_local).sum().item()
 
-        # per-class (indexed by gid)
+        #per-class (indexed by gid)
         for col, gid in enumerate(fixed_gids):
             m = (y_local == col)
             n = int(m.sum().item())
@@ -217,7 +217,7 @@ def eval_on_fixed_gids(
     }
     return overall, per_class
 
-# Quantisation Helpers
+#Quantisation Helpers
 
 def _fuse_cbr_blocks_inplace(backbone: nn.Sequential):
     for _, m in backbone.named_children():
@@ -231,11 +231,11 @@ class QuantBackboneWrapper(nn.Module):
         self.quant = QuantStub()
         self.backbone = copy.deepcopy(backbone)
         self.dequant = DeQuantStub()
-        self.gap = nn.AdaptiveAvgPool2d(1)  # do GAP in float for portability
+        self.gap = nn.AdaptiveAvgPool2d(1)  #do GAP in float for portability
     def forward(self, x):
         x = self.quant(x)
         x = self.backbone(x)
-        x = self.dequant(x)   # back to float
+        x = self.dequant(x)   #back to float
         x = self.gap(x)
         return x
 
@@ -252,19 +252,19 @@ def quantise_frozen_backbone(student_backbone: nn.Sequential, calib_loader):
     return qb_int8
 
 def features_quantized(self, x):
-    h = self.quant_backbone(x)  # float, shape (N,160,1,1)
-    return h.flatten(1)         # (N,160)
+    h = self.quant_backbone(x)  #float, shape (N,160,1,1)
+    return h.flatten(1)         #(N,160)
 
 @torch.no_grad()
 def compute_perchannel_scales(calib_loader, cil_model, pct=99.9, eps=1e-8):
     feats_all = []
     for i, (images, _) in enumerate(calib_loader):
-        f = cil_model._features(images)     # [B, C] FP32 (after dequant + GAP)
+        f = cil_model._features(images)     #[B, C] FP32 (after dequant + GAP)
         feats_all.append(f)
-        if i >= 20: break                   # ~20 batches is plenty
-    F = torch.cat(feats_all, dim=0)         # [N, C]
-    hi = torch.quantile(F.abs(), q=pct/100.0, dim=0)   # [C]
+        if i >= 20: break                   #~20 batches is plenty
+    F = torch.cat(feats_all, dim=0)         #[N, C]
+    hi = torch.quantile(F.abs(), q=pct/100.0, dim=0)   #[C]
     max_abs = torch.clamp(hi, min=eps)
-    scales = (max_abs / 127.0).contiguous()           # symmetric, zp=0
+    scales = (max_abs / 127.0).contiguous()           #symmetric, zp=0
     return scales
 

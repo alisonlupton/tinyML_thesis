@@ -1,9 +1,9 @@
-# distillation_mcu_friendly_tuned.py
-# 
-# 
-# 
-# Tuned version of MCU-friendly distillation with better hyperparameters
-# Based on distillation_mcu_friendly.py but with improvements
+#distillation_mcu_friendly_tuned.py
+
+
+
+#Tuned version of MCU-friendly distillation with better hyperparameters
+#Based on distillation_mcu_friendly.py but with improvements
 
 import json, random
 import numpy as np
@@ -65,9 +65,9 @@ class TunedMCUStudentCNN(nn.Module):
     def __init__(self, in_channels=3, feat_dim=64, num_classes=10, img_size=160):
         super().__init__()
         
-        # Improved backbone with better channel progression
+        #Improved backbone with better channel progression
         self.backbone = nn.Sequential(
-            # First conv block - more channels for better feature extraction
+            #First conv block - more channels for better feature extraction
             nn.Conv2d(in_channels, 32, 3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
@@ -76,7 +76,7 @@ class TunedMCUStudentCNN(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
             
-            # Second conv block
+            #Second conv block
             nn.Conv2d(32, 64, 3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
@@ -85,7 +85,7 @@ class TunedMCUStudentCNN(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
             
-            # Third conv block
+            #Third conv block
             nn.Conv2d(64, 128, 3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -94,7 +94,7 @@ class TunedMCUStudentCNN(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
             
-            # Fourth conv block
+            #Fourth conv block
             nn.Conv2d(128, 128, 3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -106,16 +106,16 @@ class TunedMCUStudentCNN(nn.Module):
         
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
         
-        # Improved projection head with better dropout
+        #Improved projection head with better dropout
         self.proj = nn.Sequential(
-            nn.Dropout(0.25),  # Slightly higher dropout for regularization
+            nn.Dropout(0.25),  #Slightly higher dropout for regularization
             nn.Linear(128, feat_dim),
         )
         
-        # Classification head
+        #Classification head
         self.classifier = nn.Linear(feat_dim, num_classes)
         
-        # Better weight initialization
+        #Better weight initialization
         self._init_weights()
         
     def _init_weights(self):
@@ -146,14 +146,14 @@ class TunedMCUStudentCNN(nn.Module):
 
 def tuned_kd_loss(s_logits, t_logits, T=2.5, alpha=0.8):
     """Improved KD loss with better temperature and alpha balance"""
-    # Soft targets
+    #Soft targets
     soft_loss = F.kl_div(
         F.log_softmax(s_logits/T, dim=1),
         F.softmax(t_logits/T, dim=1),
         reduction="batchmean"
     ) * (T * T)
     
-    # Hard targets (ground truth)
+    #Hard targets (ground truth)
     hard_loss = F.cross_entropy(s_logits, t_logits.argmax(dim=1))
     
     return alpha * soft_loss + (1 - alpha) * hard_loss
@@ -198,7 +198,7 @@ class DogWithCacheTargets(Dataset):
 def tuned_mcu_distillation():
     """Tuned MCU-friendly distillation with improved hyperparameters"""
     
-    # Improved configuration for better performance
+    #Improved configuration for better performance
     CFG = {
         "index_csv": "../data/dog_breed_data/stanford_dogs_index.csv",
         "teacher_meta": "../data/dog_breed_data/offline/backbone_meta.json",
@@ -208,26 +208,26 @@ def tuned_mcu_distillation():
         "proj_ckpt": "../data/dog_breed_data/distillation_1/student_from_cache.pth",
         "out_dir": "../data/dog_breed_data/distillation_mcu_tuned/",
         
-        # MCU-friendly student model (same size)
+        #MCU-friendly student model (same size)
         "feat_dim": 64,
         "num_classes": 10,
         "img_size": 160,
         
-        # Improved training parameters
+        #Improved training parameters
         "seed": 42,
-        "batch_size_train": 32,  # Larger batch for better gradients
+        "batch_size_train": 32,  #Larger batch for better gradients
         "batch_size_val": 32,
-        "epochs": 120,  # More epochs
-        "patience": 25,  # More patience
-        "lr": 5e-4,  # Lower learning rate for stability
-        "weight_decay": 5e-5,  # Reduced weight decay
+        "epochs": 120,  #More epochs
+        "patience": 25,  #More patience
+        "lr": 5e-4,  #Lower learning rate for stability
+        "weight_decay": 5e-5,  #Reduced weight decay
         
-        # Improved distillation parameters
-        "kd_T": 2.5,  # Better temperature
-        "kd_alpha": 0.8,  # Better alpha balance
+        #Improved distillation parameters
+        "kd_T": 2.5,  #Better temperature
+        "kd_alpha": 0.8,  #Better alpha balance
         "kd_weight": 1.0,
-        "feat_weight": 0.5,  # Increased feature weight
-        "ce_weight": 0.3,  # Increased CE weight
+        "feat_weight": 0.5,  #Increased feature weight
+        "ce_weight": 0.3,  #Increased CE weight
         
         "num_workers": 0,
     }
@@ -239,7 +239,7 @@ def tuned_mcu_distillation():
     print(f"Student: {CFG['feat_dim']}D features, {CFG['num_classes']} classes, {CFG['img_size']}x{CFG['img_size']} images")
     print("Improved hyperparameters for better performance")
     
-    # Load meta and caches
+    #Load meta and caches
     meta = json.loads(Path(CFG["teacher_meta"]).read_text())
     mean = meta["normalization"]["mean"]
     std = meta["normalization"]["std"]
@@ -257,11 +257,11 @@ def tuned_mcu_distillation():
     print(f"Train cache: {len(train_cache['keys'])} samples")
     print(f"Val cache: {len(val_cache['keys'])} samples")
     
-    # Build feature targets using projector
+    #Build feature targets using projector
     saved = torch.load(CFG["proj_ckpt"], map_location="cpu", weights_only=True)
     proj_sd = saved["proj_from_teacher_penult"]
     
-    # Create a new projector that maps to student feature dimension
+    #Create a new projector that maps to student feature dimension
     P = nn.Linear(train_cache["features"].shape[1], CFG["feat_dim"])
     P.weight.data.copy_(proj_sd["1.weight"][:CFG["feat_dim"], :])
     P.bias.data.copy_(proj_sd["1.bias"][:CFG["feat_dim"]])
@@ -270,7 +270,7 @@ def tuned_mcu_distillation():
     train_cache = add_feat_targets(train_cache, P)
     val_cache = add_feat_targets(val_cache, P)
     
-    # Build datasets
+    #Build datasets
     tr_map_ft, tr_map_logits, tr_map_y = build_cache_maps(train_cache)
     va_map_ft, va_map_logits, va_map_y = build_cache_maps(val_cache)
     
@@ -278,10 +278,10 @@ def tuned_mcu_distillation():
     df = df[df["gid"].isin(backbone_gids)].copy()
     gid_to_local = {g:i for i,g in enumerate(backbone_gids)}
     
-    # Simple transforms for on-device training
+    #Simple transforms for on-device training
     train_tf = transforms.Compose([
         transforms.Resize((CFG["img_size"], CFG["img_size"])),
-        transforms.RandomHorizontalFlip(p=0.5),  # Only basic flip
+        transforms.RandomHorizontalFlip(p=0.5),  #Only basic flip
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
@@ -298,7 +298,7 @@ def tuned_mcu_distillation():
     dl_tr = DataLoader(ds_tr, batch_size=CFG["batch_size_train"], shuffle=True, num_workers=CFG["num_workers"])
     dl_va = DataLoader(ds_va, batch_size=CFG["batch_size_val"], shuffle=False, num_workers=CFG["num_workers"])
     
-    # Build tuned MCU student model
+    #Build tuned MCU student model
     student = TunedMCUStudentCNN(
         in_channels=3,
         feat_dim=CFG["feat_dim"],
@@ -306,31 +306,31 @@ def tuned_mcu_distillation():
         img_size=CFG["img_size"]
     ).to(device)
     
-    # Count parameters
+    #Count parameters
     total_params = sum(p.numel() for p in student.parameters())
     print(f"Student parameters: {total_params:,}")
     print(f"Estimated model size: ~{total_params * 4 / 1024:.1f}KB (FP32)")
     print(f"After quantization (INT8): ~{total_params / 1024:.1f}KB")
     print(f"After 50% pruning + INT8: ~{total_params / 2 / 1024:.1f}KB")
     
-    # Improved optimizer and scheduler
+    #Improved optimizer and scheduler
     optimizer = torch.optim.AdamW(
         student.parameters(),
         lr=CFG["lr"],
         weight_decay=CFG["weight_decay"]
     )
     
-    # Better scheduler with warmup
+    #Better scheduler with warmup
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=CFG["lr"],
         epochs=CFG["epochs"],
         steps_per_epoch=len(dl_tr),
-        pct_start=0.1,  # 10% warmup
+        pct_start=0.1,  #10% warmup
         anneal_strategy='cos'
     )
     
-    # Training loop
+    #Training loop
     best_val_acc = 0.0
     best_state = None
     patience_counter = 0
@@ -338,7 +338,7 @@ def tuned_mcu_distillation():
     print("\nStarting tuned MCU distillation training...")
     
     for epoch in range(CFG["epochs"]):
-        # Training phase
+        #Training phase
         student.train()
         train_loss = 0.0
         train_kd_loss = 0.0
@@ -351,36 +351,36 @@ def tuned_mcu_distillation():
             tlog = tlog_cpu.to(device)
             tfeat = tfeat_cpu.to(device)
             
-            # Forward pass
+            #Forward pass
             slogits, sfeat = student(xb)
             
-            # Compute losses
+            #Compute losses
             kd_loss = tuned_kd_loss(slogits, tlog, CFG["kd_T"], CFG["kd_alpha"])
             feat_loss = tuned_feature_loss(sfeat, tfeat)
             ce_loss = F.cross_entropy(slogits, yb)
             
-            # Combined loss
+            #Combined loss
             total_loss = (CFG["kd_weight"] * kd_loss + 
                          CFG["feat_weight"] * feat_loss + 
                          CFG["ce_weight"] * ce_loss)
             
-            # Backward pass
+            #Backward pass
             optimizer.zero_grad()
             total_loss.backward()
             
-            # Gradient clipping
+            #Gradient clipping
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             
             optimizer.step()
             scheduler.step()
             
-            # Log losses
+            #Log losses
             train_loss += total_loss.item()
             train_kd_loss += kd_loss.item()
             train_feat_loss += feat_loss.item()
             train_ce_loss += ce_loss.item()
         
-        # Validation phase
+        #Validation phase
         student.eval()
         val_correct = 0
         val_total = 0
@@ -395,7 +395,7 @@ def tuned_mcu_distillation():
                 
                 slogits, sfeat = student(xb)
                 
-                # Compute validation loss
+                #Compute validation loss
                 kd_loss = tuned_kd_loss(slogits, tlog, CFG["kd_T"], CFG["kd_alpha"])
                 feat_loss = tuned_feature_loss(sfeat, tfeat)
                 ce_loss = F.cross_entropy(slogits, yb)
@@ -404,7 +404,7 @@ def tuned_mcu_distillation():
                            CFG["feat_weight"] * feat_loss + 
                            CFG["ce_weight"] * ce_loss).item()
                 
-                # Compute accuracy
+                #Compute accuracy
                 _, predicted = slogits.max(1)
                 val_total += yb.size(0)
                 val_correct += predicted.eq(yb).sum().item()
@@ -413,19 +413,19 @@ def tuned_mcu_distillation():
         avg_train_loss = train_loss / len(dl_tr)
         avg_val_loss = val_loss / len(dl_va)
         
-        # Early stopping
+        #Early stopping
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_state = {k: v.detach().cpu().clone() for k, v in student.state_dict().items()}
             patience_counter = 0
             
-            #  CHECKPOINTING EVERY EPOCH!!! --> Load best model
+            #CHECKPOINTING EVERY EPOCH!!! --> Load best model
             if best_state is not None:
                 student.load_state_dict(best_state)
             
             print(f"\nBest validation accuracy: {best_val_acc:.2f}%")
             
-            # Save the tuned student
+            #Save the tuned student
 
             save_dict = {
                 "backbone": {k.replace("backbone.", ""): v for k, v in student.state_dict().items() if k.startswith("backbone.")},
@@ -437,7 +437,7 @@ def tuned_mcu_distillation():
         else:
             patience_counter += 1
         
-        # Print progress
+        #Print progress
         if epoch % 10 == 0 or epoch == CFG["epochs"] - 1:
             print(f"Epoch {epoch:3d}/{CFG['epochs']} | "
                   f"Train Loss: {avg_train_loss:.4f} | "
@@ -462,7 +462,7 @@ def tuned_mcu_distillation():
         "total_params": total_params,
         "model_size_fp32_kb": total_params * 4 / 1024,
         "model_size_int8_kb": total_params / 1024,
-        "model_size_pruned_int8_kb": total_params / 2 / 1024,  # 50% pruning estimate
+        "model_size_pruned_int8_kb": total_params / 2 / 1024,  #50% pruning estimate
     }
     
     (out_dir / "tuned_mcu_student_meta.json").write_text(json.dumps(meta_out, indent=2))

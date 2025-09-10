@@ -113,6 +113,9 @@
     "backbone_batch_size_val": 32,
     "backbone_sparsity_ratio": 0.0,
     "buffer_size": 5000,
+    "replay": true,
+    "adaptive_head": true,
+    "teacher": true,
     "sparsity_ratio": 0.3,
     "CIL_batch_size_train": 1,
     "replay_batch_size": 1,
@@ -127,7 +130,7 @@
     "cwi_alpha": 1.0,
     "cwi_beta": 1.0,
     "cwi_ema": 0.9,
-    "metrics_path": "plots_and_metrics/dog_cil_metrics.txt",
+    "metrics_path": "report_metrics/dog_cil_metrics.txt",
     "plot_dir": "plots_and_metrics",
     "select_breeds": [],
     "select_dog_ids": []

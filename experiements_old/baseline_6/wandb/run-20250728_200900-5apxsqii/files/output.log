@@ -1,0 +1,66 @@
+
+=== Training on Task 0 ===
+Task 0: 100%|███████████████████████████████████████████████████████████████████████████████████████████| 400/400 [01:05<00:00,  6.14batch/s, loss=0.642]
+Starting Evaluation on task: 0
+Evaluating on seen data: 100%|████████████████████████████████████████████████████████████████████████████████████████| 16/16 [00:11<00:00,  1.40batch/s]
+After task 0, overall acc on seen data: 0.879
+  Task 0 → acc: 0.879
+Starting full evaluation on task: 0
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████████████████████████████| 80/80 [00:58<00:00,  1.36batch/s]
+After task 0, CIFAR10 full acc: 0.176
+
+=== Training on Task 1 ===
+Task 1: 100%|████████████████████████████████████████████████████████████████████████████████████████████| 400/400 [01:08<00:00,  5.86batch/s, loss=1.13]
+Starting Evaluation on task: 1
+Evaluating on seen data: 100%|████████████████████████████████████████████████████████████████████████████████████████| 32/32 [00:24<00:00,  1.31batch/s]
+After task 1, overall acc on seen data: 0.593
+  Task 0 → acc: 0.521
+  Task 1 → acc: 0.665
+Starting full evaluation on task: 1
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████████████████████████████| 80/80 [01:01<00:00,  1.31batch/s]
+After task 1, CIFAR10 full acc: 0.237
+
+=== Training on Task 2 ===
+Task 2: 100%|████████████████████████████████████████████████████████████████████████████████████████████| 400/400 [01:09<00:00,  5.74batch/s, loss=1.33]
+Starting Evaluation on task: 2
+Evaluating on seen data: 100%|████████████████████████████████████████████████████████████████████████████████████████| 48/48 [00:41<00:00,  1.15batch/s]
+After task 2, overall acc on seen data: 0.463
+  Task 0 → acc: 0.489
+  Task 1 → acc: 0.260
+  Task 2 → acc: 0.640
+Starting full evaluation on task: 2
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████████████████████████████| 80/80 [01:06<00:00,  1.21batch/s]
+After task 2, CIFAR10 full acc: 0.278
+
+=== Training on Task 3 ===
+Task 3:  38%|██████████████████████████████████▋                                                         | 151/400 [00:28<00:46,  5.35batch/s, loss=1.85]
+Traceback (most recent call last):
+  File "/Users/alisonlupton/Desktop/thesis_code/baseline_6/main.py", line 793, in <module>
+    main()
+  File "/Users/alisonlupton/Desktop/thesis_code/baseline_6/main.py", line 711, in main
+    train_exp, eval_exp, accs, forgettings, overall, overall_full = train_with_latent_replay(
+  File "/Users/alisonlupton/Desktop/thesis_code/baseline_6/main.py", line 305, in train_with_latent_replay
+    live_feats     = extract_latent(x_live)     # (live_B, D)
+  File "/Users/alisonlupton/Desktop/thesis_code/baseline_6/main.py", line 272, in extract_latent
+    h = frozen_model.features(h)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/container.py", line 240, in forward
+    input = module(input)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/Users/alisonlupton/Desktop/thesis_code/baseline_6/quicknet.py", line 29, in forward
+    x = self.pointwise(x)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/conv.py", line 554, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+  File "/Users/alisonlupton/Desktop/thesis_code/.venv/lib/python3.10/site-packages/torch/nn/modules/conv.py", line 549, in _conv_forward
+    return F.conv2d(
+KeyboardInterrupt

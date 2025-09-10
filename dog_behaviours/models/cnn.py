@@ -1,4 +1,4 @@
-# cnn.py
+#cnn.py
 import torch.nn as nn
 from .cnn_head import ClassRegistry, SimplifiedTDMHead
 
@@ -21,20 +21,20 @@ class SimplifiedTDMModelCNN(nn.Module):
 
     def _features(self, x):
         h = self.backbone(x)
-        return self.gap(h).squeeze(-1)  # (N, 32)
+        return self.gap(h).squeeze(-1)  #(N, 32)
 
-    # for backbone training
+    #for backbone training
     def forward(self, x):
         feats = self._features(x)
-        rows = list(range(self.head.out_dim))        # all current rows
+        rows = list(range(self.head.out_dim))        #all current rows
         return self.head.forward_rows(feats, rows)
-    # task-time forward (only current classes)
+    #task-time forward (only current classes)
     def forward_task(self, x, registry: ClassRegistry, task_classes):
         feats = self._features(x)
         rows = registry.rows_for_task(task_classes)
         return self.head.forward_rows(feats, rows)
 
-    # eval-time forward (7-way assembled on the fly)
+    #eval-time forward (7-way assembled on the fly)
     def forward_eval7(self, x, registry: ClassRegistry):
         feats = self._features(x)
         return self.head.forward_eval7(feats, registry)
@@ -45,7 +45,7 @@ class SimplifiedTDMModelCNN(nn.Module):
         added = [c for c in new_class_names if c not in old_seen]
         if len(added) > 0:
             self.head.expand(len(added))
-    # in SimplifiedTDMModelCNN
+    #in SimplifiedTDMModelCNN
     def forward_rows(self, x, rows):
         feats = self._features(x)
         return self.head.forward_rows(feats, rows)

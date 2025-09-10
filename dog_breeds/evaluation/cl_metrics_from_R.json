@@ -1,0 +1,22 @@
+{
+  "cumulative": {
+    "Average_Accuracy": 51.5,
+    "Average_Incremental_Accuracy": 51.28,
+    "Average_Forgetting": 3.63,
+    "intransigence": 6.1,
+    "Backward_Transfer": 0.68,
+    "Forward_Transfer": 44.56,
+    "Modified_BWT_kappa": 3.32,
+    "Modified_FWT_zeta": 41.92
+  },
+  "new_class_only": {
+    "Average_Accuracy": 67.16,
+    "Average_Incremental_Accuracy": 69.87,
+    "Average_Forgetting": 9.09,
+    "intransigence": -13.08,
+    "Backward_Transfer": -9.09,
+    "Forward_Transfer": -0.08,
+    "Modified_BWT_kappa": -10.31,
+    "Modified_FWT_zeta": 0.0
+  }
+}

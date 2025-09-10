@@ -1,13 +1,13 @@
-# distillation_1.py
-# (cache KD) linear projector
+#distillation_1.py
+#(cache KD) linear projector
 '''
- learn a projector that maps teacher penultimate space (1280-D) → student feature space
+ learn a projector that maps teacher penultimate space (1280-D)  student feature space
  can use both teacher logits and teacher features
  
  Outputs: 
- - proj_from_teacher_penult: weights of the learned projector (Linear 1280→128).
-    - This tells the student what “good” 128-D features should look like (in teacher’s sense)!!
- -kd_head: a small linear head (128→B) trained in feature space.
+ - proj_from_teacher_penult: weights of the learned projector (Linear 1280128).
+    - This tells the student what good 128-D features should look like (in teachers sense)!!
+ -kd_head: a small linear head (128B) trained in feature space.
 	-Useful for monitoring / sanity ( on CIL I will use my own TDM head)
  '''
 
@@ -47,7 +47,7 @@ def kd_loss(student_logits, teacher_logits, T=2.0):
 def log_logit_std(model, loader, device, prefix="train", max_batches=2):
     """Logs avg per-sample std of logits for student vs teacher."""
     was_training = model.training
-    model.eval()                       # disable dropout for clean stats
+    model.eval()                       #disable dropout for clean stats
 
     s_std_list, t_std_list = [], []
     batches = 0
@@ -55,10 +55,10 @@ def log_logit_std(model, loader, device, prefix="train", max_batches=2):
         xb = xb.to(device)
         tb = tb.to(device)
 
-        slogits, _ = model(xb)         # [N, C]
-        # per-sample std across classes
-        s_std = slogits.std(dim=1)     # [N]
-        t_std = tb.std(dim=1)          # [N]
+        slogits, _ = model(xb)         #[N, C]
+        #per-sample std across classes
+        s_std = slogits.std(dim=1)     #[N]
+        t_std = tb.std(dim=1)          #[N]
 
         s_std_list.append(s_std.mean().item())
         t_std_list.append(t_std.mean().item())
@@ -73,8 +73,8 @@ def log_logit_std(model, loader, device, prefix="train", max_batches=2):
     s_mean = sum(s_std_list) / max(1, len(s_std_list))
     t_mean = sum(t_std_list) / max(1, len(t_std_list))
     ratio = s_mean / max(1e-8, t_mean)
-    print(f"[{prefix}] avg per-sample logit std: student≈{s_mean:.3f}, teacher≈{t_mean:.3f} (ratio≈{ratio:.2f})")
-# -------------- per-class report --------------
+    print(f"[{prefix}] avg per-sample logit std: student{s_mean:.3f}, teacher{t_mean:.3f} (ratio{ratio:.2f})")
+#-------------- per-class report --------------
 @torch.no_grad()
 def eval_per_class(model, loader, num_classes, device):
     tot = [0]*num_classes
@@ -93,7 +93,7 @@ def eval_per_class(model, loader, num_classes, device):
     return [100.0*cor[c]/tot[c] if tot[c]>0 else 0.0 for c in range(num_classes)]
 
 
-# -------------- train --------------
+#-------------- train --------------
 def train(student, opt, distillation_epochs, device, tr_dl, va_dl, alpha_kd, alpha_ce, kd_T, ce, alpha_feat, mse, distillation_patience, num_classes):
     best_val, best_state, stall = 0.0, None, 0
     for ep in range(distillation_epochs):
@@ -106,10 +106,10 @@ def train(student, opt, distillation_epochs, device, tr_dl, va_dl, alpha_kd, alp
                 with torch.no_grad():
                     s_std = slogits.std(dim=1).mean().item()
                     t_std = tb.std(dim=1).mean().item()
-                    print(f"[sanity] avg per-sample logit std: student≈{s_std:.3f}, teacher≈{t_std:.3f}")
+                    print(f"[sanity] avg per-sample logit std: student{s_std:.3f}, teacher{t_std:.3f}")
             loss = alpha_kd*kd_loss(slogits, tb, kd_T) \
                 + alpha_ce*ce(slogits, yb)
-            # use cosine instead of mse    
+            #use cosine instead of mse
             if alpha_feat > 0:
                 loss += alpha_feat * (1.0 - F.cosine_similarity(
                     F.normalize(z, dim=1), F.normalize(xb, dim=1), dim=1
@@ -119,7 +119,7 @@ def train(student, opt, distillation_epochs, device, tr_dl, va_dl, alpha_kd, alp
             opt.step()
             loss_sum += float(loss.item())
 
-        # val
+        #val
         student.eval()
         tot = cor = 0
         with torch.no_grad():
@@ -142,7 +142,7 @@ def train(student, opt, distillation_epochs, device, tr_dl, va_dl, alpha_kd, alp
                 break
         log_logit_std(student, tr_dl, device, prefix="train", max_batches=2)
         log_logit_std(student, va_dl, device, prefix="val",   max_batches=2)
-        # val per class
+        #val per class
         cls_acc = eval_per_class(student, va_dl, num_classes, device)
         print("\nPer-class (student on cached features):")
         for i, acc in enumerate(cls_acc):
@@ -154,7 +154,7 @@ def train(student, opt, distillation_epochs, device, tr_dl, va_dl, alpha_kd, alp
 ################### MAIN FUNCTION!!!!!!
 ##################
 def distillation_1():
-    # -------------- config --------------
+    #-------------- config --------------
     cfg = load_config()
     cache_dir = cfg['cache_dir']    
     out_dir = cfg['out_dir']
@@ -173,36 +173,36 @@ def distillation_1():
     distillation_dropout = 0.3
     distillation_dropout = cfg['']
 
-    # NOTE: if distillation_alpha_feat and distillation_alpha_ce > 0 , we are no longer using class "logit only distillation"
-    # we have 
-    # - KD term (teacher soft labels) controlled by distillation_alpha_kd, KD_T
-	# - CE term (ground truth) controlled by distillation_alpha_ce
-	# - Feature term (rep alignment) controlled by distillation_alpha_feat
+    #NOTE: if distillation_alpha_feat and distillation_alpha_ce > 0 , we are no longer using class "logit only distillation"
+    #we have
+    #- KD term (teacher soft labels) controlled by distillation_alpha_kd, KD_T
+	#- CE term (ground truth) controlled by distillation_alpha_ce
+	#- Feature term (rep alignment) controlled by distillation_alpha_feat
  
-    # alpha_kd = how much I care about KD?
-	# kd_T = how soft is the teacher’s signal in KD?
+    #alpha_kd = how much I care about KD?
+	#kd_T = how soft is the teachers signal in KD?
 
     device = torch.device("cpu")
 
-    # -------------- load caches --------------
+    #-------------- load caches --------------
     cache_dir = Path(cache_dir)
     train_cache = torch.load(cache_dir/"train_cache.pt", map_location="cpu", weights_only= True)
     val_cache   = torch.load(cache_dir/"val_cache.pt",   map_location="cpu", weights_only= True)
     
     
-    # ----------------load tensors --------------
-    xtr = train_cache["features"].float()    # [Ntr, 1280]  teacher penult features
-    ytr = train_cache["y_local"].long()     # [Ntr]
-    tlog_tr = train_cache["logits"].float()  # [Ntr, B]
+    #----------------load tensors --------------
+    xtr = train_cache["features"].float()    #[Ntr, 1280] teacher penult features
+    ytr = train_cache["y_local"].long()     #[Ntr]
+    tlog_tr = train_cache["logits"].float()  #[Ntr, B]
 
-    xva = val_cache["features"].float()      # [Nva, 1280]
-    yva = val_cache["y_local"].long()       # [Nva]
-    tlog_va = val_cache["logits"].float()    # [Nva, B]
+    xva = val_cache["features"].float()      #[Nva, 1280]
+    yva = val_cache["y_local"].long()       #[Nva]
+    tlog_va = val_cache["logits"].float()    #[Nva, B]
 
     meta = train_cache["meta"]
-    local_ids = meta["backbone_gids"]               # global IDs order used in head
-    num_classes = tlog_tr.shape[1]                  # B
-    feat_teacher = xtr.shape[1]                     # 1280
+    local_ids = meta["backbone_gids"]               #global IDs order used in head
+    num_classes = tlog_tr.shape[1]                  #B
+    feat_teacher = xtr.shape[1]                     #1280
 
     print(f"Train: feats={tuple(xtr.shape)} logits={tuple(tlog_tr.shape)}")
     print(f" Val : feats={tuple(xva.shape)} logits={tuple(tlog_va.shape)}")
@@ -213,20 +213,20 @@ def distillation_1():
 
     
     
-    # -------------- student on cached features --------------
-    # Learn a small projector (1280→feat_dim) + KD head.
-    # After training, we save only the projector weights as “proj” (for tiny CNN it’s the same shape).
+    #-------------- student on cached features --------------
+    #Learn a small projector (1280feat_dim) + KD head.
+    #After training, we save only the projector weights as proj (for tiny CNN its the same shape).
     
     student = StudentOnCache(in_dim=feat_teacher, feat_dim=feat_dim_student,
                          num_classes=num_classes, drop= distillation_dropout).to(device)
 
-    # -------------- loaders --------------
+    #-------------- loaders --------------
     tr_ds = TensorDataset(xtr, ytr, tlog_tr)
     va_ds = TensorDataset(xva, yva, tlog_va)
     tr_dl = DataLoader(tr_ds, batch_size=distillation_batch_size_train, shuffle=True)
     va_dl = DataLoader(va_ds, batch_size=distillation_batch_size_val, shuffle=False)
     
-    # -------------- losses --------------
+    #-------------- losses --------------
 
     ce = nn.CrossEntropyLoss(label_smoothing=distillation_label_smoothing)
     mse = nn.MSELoss()
@@ -245,10 +245,10 @@ def distillation_1():
         
     
 
-    # -------------- save artifacts for CIL --------------
+    #-------------- save artifacts for CIL --------------
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
 
-    # Only need projector weights; the CIL tiny CNN backbone outputs 128 then proj→feat_dim in CIL.
+    #Only need projector weights; the CIL tiny CNN backbone outputs 128 then projfeat_dim in CIL.
     save = {
         "proj_from_teacher_penult": {k.replace("proj.", ""): v for k, v in student.state_dict().items() if k.startswith("proj.")},
         "kd_head": {k.replace("kd_head.", ""): v for k, v in student.state_dict().items() if k.startswith("kd_head.")},
@@ -263,8 +263,8 @@ def distillation_1():
     (out/"student_from_cache_meta.json").write_text(json.dumps(save["meta"], indent=2))
 
     print("\nSaved:")
-    print(f"  • {out/'student_from_cache.pth'}")
-    print(f"  • {out/'student_from_cache_meta.json'}")
+    print(f"   {out/'student_from_cache.pth'}")
+    print(f"   {out/'student_from_cache_meta.json'}")
 
 
 if __name__ == "__main__":

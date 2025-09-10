@@ -1,22 +1,22 @@
 {
   "cumulative": {
-    "Average_Accuracy": 91.38,
-    "Average_Incremental_Accuracy": 92.78,
-    "Average_Forgetting": 3.04,
-    "intransigence": 8.38,
-    "Backward_Transfer": -3.04,
-    "Forward_Transfer": 74.91,
-    "Modified_BWT_kappa": -2.19,
-    "Modified_FWT_zeta": 89.15
+    "Average_Accuracy": 94.9,
+    "Average_Incremental_Accuracy": 94.32,
+    "Average_Forgetting": -0.77,
+    "intransigence": -1.13,
+    "Backward_Transfer": 1.59,
+    "Forward_Transfer": 74.1,
+    "Modified_BWT_kappa": 1.61,
+    "Modified_FWT_zeta": 88.07
   },
   "new_class_only": {
-    "Average_Accuracy": 92.81,
-    "Average_Incremental_Accuracy": 90.94,
-    "Average_Forgetting": 2.19,
-    "intransigence": 1.85,
-    "Backward_Transfer": -2.19,
+    "Average_Accuracy": 88.4,
+    "Average_Incremental_Accuracy": 88.23,
+    "Average_Forgetting": 1.34,
+    "intransigence": 6.4,
+    "Backward_Transfer": -0.04,
     "Forward_Transfer": -15.48,
-    "Modified_BWT_kappa": -2.15,
+    "Modified_BWT_kappa": 0.85,
     "Modified_FWT_zeta": 0.0
   }
 }

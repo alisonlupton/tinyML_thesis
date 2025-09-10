@@ -21,17 +21,21 @@ backbone_sparsity_ratio: 0.0
 # CIL training
 student_path: "../data/dog_breed_data/distillation_2/tuned_mcu_student_73.11.pth"
 student_meta_path: "../data/dog_breed_data/distillation_2/student_meta.json"
-buffer_size: 3000
+buffer_size: 1000
+replay: True
+teacher: True
+adaptive_head: True
 sparsity_ratio: 0.0
 CIL_batch_size_train: 1
-replay_batch_size: 1 # tends to match the live batch size, but can tune this
+replay_batch_size: 4 # tends to match the live batch size, but can tune this
 CIL_batch_size_test: 1
-CIL_epochs: 5
+CIL_epochs: 15
 CIL_learning_rate: 0.001
-ddr_kd_weight: 0.5
+ddr_kd_weight: 0.6
 p_intra: 0.02
 p_inter: 0.05
-delta_k: 2
+delta_k: 0.5
+kd_temp: 6.0
 cwi_alpha: 1.0
 cwi_beta: 1.0
 cwi_ema: 0.9 # optional, not in SparCL
@@ -39,7 +43,13 @@ metrics_path: "plots_and_metrics/dog_breed_cil_metrics.txt"
 plot_dir: "plots_and_metrics"
 mean_tf: [0.485, 0.456, 0.406]
 std_tf: [0.229, 0.224, 0.225]
-lambda_replay: 0.5
+
+# Replay
+lambda_replay: 2
+hard_frac: 0.4
+eps: 0.1
+rho: 0.5
+hard_ratio: 0.80
 
 # If set, only include these breeds (names must match DogInfo.xlsx). Leave empty to keep all.
 select_breeds: []

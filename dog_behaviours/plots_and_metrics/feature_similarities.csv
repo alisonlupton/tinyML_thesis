@@ -1,0 +1,22 @@
+Class_Pair,Cosine_Similarity
+Trotting-Galloping,0.8915876150131226
+Walking-Trotting,0.8771727085113525
+Walking-Sniffing,0.8691546320915222
+Walking-Galloping,0.7468258738517761
+Sniffing-Trotting,0.7453669905662537
+Standing-Lying chest,0.6617563962936401
+Sniffing-Galloping,0.6606627106666565
+Standing-Walking,0.6507686972618103
+Standing-Sniffing,0.5691090226173401
+Sitting-Galloping,0.46587881445884705
+Standing-Trotting,0.4466974139213562
+Lying chest-Trotting,0.4109421968460083
+Walking-Lying chest,0.40875810384750366
+Lying chest-Sniffing,0.3911946713924408
+Sitting-Lying chest,0.3808283507823944
+Lying chest-Galloping,0.3746803402900696
+Standing-Galloping,0.3567383289337158
+Sitting-Sniffing,0.27370959520339966
+Sitting-Trotting,0.2304808795452118
+Walking-Sitting,0.21662694215774536
+Standing-Sitting,0.11682580411434174

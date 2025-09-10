@@ -1,4 +1,4 @@
-# utils.py
+#utils.py
 
 import torch
 import yaml
@@ -8,7 +8,7 @@ from PIL import Image
 import torch, torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-torch.set_num_threads(1)  # single-thread CPU
+torch.set_num_threads(1)  #single-thread CPU
 from tqdm import tqdm
 
 #####
@@ -24,7 +24,7 @@ def build_tensors(sub_df, tf):
             img = Image.open(r.img_path).convert("RGB")
             Xs.append(tf(img))
             ys.append(r.local)
-        X = torch.stack(Xs, dim=0)   # (N, C, H, W)
+        X = torch.stack(Xs, dim=0)   #(N, C, H, W)
         y = torch.tensor(ys, dtype=torch.long)
         return X, y
 
@@ -33,16 +33,16 @@ def set_seed(seed):
     """Set random seeds for reproducibility across all libraries."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # if using multi-GPU
+    torch.cuda.manual_seed_all(seed)  #if using multi-GPU
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 
-# ---- KD / DDR loss between current & teacher on *previous* classes ----
+#---- KD / DDR loss between current & teacher on *previous* classes ----
 def kd_loss_ce(current_logits, teacher_logits, T=2.0, weight=1.0):
-    # logits expected over the same class rows
+    #logits expected over the same class rows
     pc = torch.log_softmax(current_logits / T, dim=1)
     pt = torch.softmax(teacher_logits / T, dim=1).detach()
     return weight * (T*T) * torch.nn.functional.kl_div(pc, pt, reduction='batchmean')
@@ -52,14 +52,14 @@ class ClassRegistry:
     Optionally carries pretty names for logging.
     """
     def __init__(self, gid2name: dict | None = None):
-        # gid -> row index (assigned in the order classes are added)
+        #gid -> row index (assigned in the order classes are added)
         self.row_for_gid: dict[int, int] = {}
-        # row index -> gid (by position)
+        #row index -> gid (by position)
         self.gid_for_row: list[int] = []
-        # optional name mapping for convenience/printing
+        #optional name mapping for convenience/printing
         self.gid2name = {int(k): v for k, v in (gid2name or {}).items()}   
 
-    # ---- add / query ----
+    #---- add / query ----
     def add_gids(self, gids: list[int]):
         """Append any unseen gids to the head layout."""
         for g in gids:
@@ -76,7 +76,7 @@ class ClassRegistry:
     def num_classes(self) -> int:
         return len(self.gid_for_row)
 
-    # ---- row lookups ----
+    #---- row lookups ----
     def rows_for_gids(self, gids: list[int]) -> list[int]:
         """Return the row indices (in the same order as gids)."""
         return [self.row_for_gid[int(g)] for g in gids]
@@ -96,11 +96,11 @@ class ClassRegistry:
             rows.append(self.row_for_gid.get(g, -1))
         return rows
 
-    # ---- optional convenience for names ----
+    #---- optional convenience for names ----
     def name_for_gid(self, gid: int) -> str:
         return self.gid2name.get(int(gid), f"gid_{int(gid)}")
 
-# ----------------- Label mapping (gid -> local) -----------------
+#----------------- Label mapping (gid -> local) -----------------
 def make_global_to_local_map_gids(seen_gids: list[int], device: str | torch.device = "cpu"):
     """
     Create a vectorized map from global gid to local index [0..|seen|-1].
@@ -118,7 +118,49 @@ def make_global_to_local_map_gids(seen_gids: list[int], device: str | torch.devi
     m[local_to_gid] = torch.arange(len(seen_sorted), dtype=torch.long, device=device)
     return m, local_to_gid
 
-# ----------------- (Optional) simple evaluation over seen classes -----------------
+#----------------- Evaluation for all classes (including unseen) -----------------
+@torch.no_grad()
+def evaluate_all_classes(model, loader, registry, target_13_gids, device):
+    """
+    Evaluate model on all 13 classes, treating unseen classes as 0% accuracy.
+    Returns overall accuracy, per-class accuracies, and sample counts.
+    """
+    from cnn_backbone_training_utils import eval_on_fixed_gids
+    
+    #Use the existing eval_on_fixed_gids function (which was working correctly)
+    overall, per_class_gids = eval_on_fixed_gids(
+        model=model,
+        loader=loader,
+        registry=registry,
+        fixed_gids=target_13_gids,
+        device=device
+    )
+    
+    #Convert gid-based results to index-based results
+    per_class = {}
+    per_total = {}
+    per_correct = {}
+    
+    #Count actual samples in the loader for proper weighting
+    model.eval()
+    sample_counts = {i: 0 for i in range(len(target_13_gids))}
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb, yb = xb.to(device), yb.to(device)
+            for i, gid in enumerate(target_13_gids):
+                #Count samples for each class
+                mask = (yb == i)
+                sample_counts[i] += mask.sum().item()
+    
+    for i, gid in enumerate(target_13_gids):
+        acc = per_class_gids.get(int(gid), 0.0)
+        per_class[i] = acc
+        per_total[i] = sample_counts[i]
+        per_correct[i] = int(acc * sample_counts[i] / 100.0)  #Convert percentage back to count
+    
+    return overall, per_class, per_total, per_correct
+
+#----------------- (Optional) simple evaluation over seen classes -----------------
 @torch.no_grad()
 def eval_over_seen(model, loader, registry: ClassRegistry, local_to_gid: torch.LongTensor, device):
     """

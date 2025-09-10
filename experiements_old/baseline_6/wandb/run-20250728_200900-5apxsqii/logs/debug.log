@@ -1,0 +1,22 @@
+2025-07-28 20:09:00,468 INFO    MainThread:94990 [wandb_setup.py:_flush():81] Current SDK version is 0.20.1
+2025-07-28 20:09:00,468 INFO    MainThread:94990 [wandb_setup.py:_flush():81] Configure stats pid to 94990
+2025-07-28 20:09:00,468 INFO    MainThread:94990 [wandb_setup.py:_flush():81] Loading settings from /Users/alisonlupton/.config/wandb/settings
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_setup.py:_flush():81] Loading settings from /Users/alisonlupton/Desktop/thesis_code/baseline_6/wandb/settings
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_init.py:setup_run_log_directory():703] Logging user logs to /Users/alisonlupton/Desktop/thesis_code/baseline_6/wandb/run-20250728_200900-5apxsqii/logs/debug.log
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_init.py:setup_run_log_directory():704] Logging internal logs to /Users/alisonlupton/Desktop/thesis_code/baseline_6/wandb/run-20250728_200900-5apxsqii/logs/debug-internal.log
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_init.py:init():831] calling init triggers
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_init.py:init():836] wandb.init called with sweep_config: {}
+config: {'device': 'cpu', 'dataset': 'CIFAR10', 'num_classes': 10, 'num_tasks': 5, 'backbone_path': 'models/quicknet_tinyimagenet_bestmodel.pth', 'model_folder': 'models', 'batch_size': {'train': 64, 'test': 1000}, 'replay_buffer_size': 1000, 'live_batch': 25, 'replay_batch': 100, 'epochs': 1, 'backbone': 'quicknet', 'wandb_activate': True, 'project': "Master's Thesis", '_wandb': {}}
+2025-07-28 20:09:00,469 INFO    MainThread:94990 [wandb_init.py:init():872] starting backend
+2025-07-28 20:09:01,512 INFO    MainThread:94990 [wandb_init.py:init():875] sending inform_init request
+2025-07-28 20:09:01,546 INFO    MainThread:94990 [wandb_init.py:init():883] backend started and connected
+2025-07-28 20:09:01,550 INFO    MainThread:94990 [wandb_init.py:init():956] updated telemetry
+2025-07-28 20:09:01,574 INFO    MainThread:94990 [wandb_init.py:init():980] communicating run to backend with 90.0 second timeout
+2025-07-28 20:09:02,475 INFO    MainThread:94990 [wandb_init.py:init():1032] starting run threads in backend
+2025-07-28 20:09:02,555 INFO    MainThread:94990 [wandb_run.py:_console_start():2453] atexit reg
+2025-07-28 20:09:02,555 INFO    MainThread:94990 [wandb_run.py:_redirect():2301] redirect: wrap_raw
+2025-07-28 20:09:02,556 INFO    MainThread:94990 [wandb_run.py:_redirect():2370] Wrapping output streams.
+2025-07-28 20:09:02,556 INFO    MainThread:94990 [wandb_run.py:_redirect():2393] Redirects installed.
+2025-07-28 20:09:02,564 INFO    MainThread:94990 [wandb_init.py:init():1078] run started, returning control to user process
+2025-07-28 20:18:36,919 INFO    MsgRouterThr:94990 [mailbox.py:close():129] [no run ID] Closing mailbox, abandoning 1 handles.

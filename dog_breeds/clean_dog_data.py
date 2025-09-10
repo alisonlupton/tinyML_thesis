@@ -1,4 +1,4 @@
-# clean_dog_data.py
+#clean_dog_data.py
 from pathlib import Path
 import pandas as pd
 from scipy.io import loadmat
@@ -9,7 +9,7 @@ from utils import load_config
 def _parse_list(mat_path):
     m = loadmat(mat_path)
     files  = [str(x[0]).strip() for x in m['file_list'].squeeze()]
-    labels = [int(x) for x in m['labels'].squeeze()]  # 1..120
+    labels = [int(x) for x in m['labels'].squeeze()]  #1..120
     return files, labels
 
 def main():
@@ -25,14 +25,14 @@ def main():
 
     def rows(files, labels, split):
         for fp, y in zip(files, labels):
-            breed = fp.split('/')[0]  # e.g., n02085620-Chihuahua
+            breed = fp.split('/')[0]  #e.g., n02085620-Chihuahua
             yield dict(
                 split=split,
                 rel_path=fp,
                 img_path=str(root/"Images"/fp),
-                ann_path=str(root/"Annotations"/(fp.replace('.jpg',''))), # folder + xml name
+                ann_path=str(root/"Annotations"/(fp.replace('.jpg',''))), #folder + xml name
                 breed=breed,
-                gid=int(y)-1   # 0..119
+                gid=int(y)-1   #0..119
             )
 
     df = pd.DataFrame([*rows(tr_files,tr_labels,"train"), *rows(te_files,te_labels,"test")])

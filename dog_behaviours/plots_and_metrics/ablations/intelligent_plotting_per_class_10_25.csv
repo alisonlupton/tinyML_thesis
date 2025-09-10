@@ -1,0 +1,29 @@
+Stage,Behavior,Accuracy
+Backbone,Galloping,0.0
+Backbone,Trotting,0.0
+Backbone,Lying chest,98.70466321243524
+Backbone,Standing,91.35802469135803
+Backbone,Walking,99.62406015037594
+Backbone,Sniffing,0.0
+Backbone,Sitting,98.567335243553
+Task 1,Galloping,0.0
+Task 1,Trotting,0.0
+Task 1,Lying chest,92.2279792746114
+Task 1,Standing,99.38271604938272
+Task 1,Walking,99.62406015037594
+Task 1,Sniffing,83.33333333333333
+Task 1,Sitting,97.70773638968481
+Task 2,Galloping,0.0
+Task 2,Trotting,93.87755102040816
+Task 2,Lying chest,90.67357512953367
+Task 2,Standing,99.38271604938272
+Task 2,Walking,97.74436090225564
+Task 2,Sniffing,89.84375
+Task 2,Sitting,98.567335243553
+Task 3,Galloping,90.74074074074075
+Task 3,Trotting,86.73469387755102
+Task 3,Lying chest,87.8238341968912
+Task 3,Standing,99.38271604938272
+Task 3,Walking,93.98496240601504
+Task 3,Sniffing,97.13541666666667
+Task 3,Sitting,97.42120343839541

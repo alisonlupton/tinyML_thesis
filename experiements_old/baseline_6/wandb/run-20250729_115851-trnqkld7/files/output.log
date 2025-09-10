@@ -1,0 +1,60 @@
+
+=== Training on Task 0 ===
+Task 0: 100%|██████████████████████████████████████████████████████████████████████████████████████| 400/400 [01:10<00:00,  5.64batch/s, loss=0.699]
+Starting Evaluation on task: 0
+Evaluating on seen data: 100%|████████████████████████████████████████████████████████████████| 16/16 [00:16<00:00,  1.02s/batch]
+After task 0, overall acc on seen data: 0.881
+  Task 0 → acc: 0.881
+Starting full evaluation on task: 0
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████| 80/80 [01:11<00:00,  1.12batch/s]
+After task 0, CIFAR10 full acc: 0.176
+
+=== Training on Task 1 ===
+Task 1: 100%|██████████████████████████████████████████████████████████████████████████| 400/400 [01:26<00:00,  4.65batch/s, loss=1.16]
+Starting Evaluation on task: 1
+Evaluating on seen data: 100%|████████████████████████████████████████████████████████████████████████████████████████| 32/32 [00:30<00:00,  1.06batch/s]
+After task 1, overall acc on seen data: 0.577
+  Task 0 → acc: 0.491
+  Task 1 → acc: 0.662
+Starting full evaluation on task: 1
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████████████████████████████| 80/80 [01:09<00:00,  1.14batch/s]
+After task 1, CIFAR10 full acc: 0.231
+
+=== Training on Task 2 ===
+Task 2: 100%|████████████████████████████████████████████████████████████████████████████████████████████| 400/400 [01:18<00:00,  5.07batch/s, loss=1.51]
+Starting Evaluation on task: 2
+Evaluating on seen data: 100%|███████████████████████████████████████████████████████████████████| 48/48 [00:38<00:00,  1.26batch/s]
+After task 2, overall acc on seen data: 0.457
+  Task 0 → acc: 0.467
+  Task 1 → acc: 0.281
+  Task 2 → acc: 0.623
+Starting full evaluation on task: 2
+Evaluating on full CIFAR10: 100%|████████████████████████████████████████████████████████████████| 80/80 [01:05<00:00,  1.23batch/s]
+After task 2, CIFAR10 full acc: 0.274
+
+=== Training on Task 3 ===
+Task 3: 100%|████████████████████████████████████████████████████| 400/400 [01:10<00:00,  5.66batch/s, loss=1.51]
+Starting Evaluation on task: 3
+Evaluating on seen data: 100%|████████████████████████████████████████████████| 64/64 [00:50<00:00,  1.26batch/s]
+After task 3, overall acc on seen data: 0.433
+  Task 0 → acc: 0.424
+  Task 1 → acc: 0.209
+  Task 2 → acc: 0.374
+  Task 3 → acc: 0.724
+Starting full evaluation on task: 3
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████████████████████████| 80/80 [01:08<00:00,  1.17batch/s]
+After task 3, CIFAR10 full acc: 0.346
+
+=== Training on Task 4 ===
+Task 4: 100%|████████████████████████████████████████████████████████████████████████████████████████| 400/400 [01:15<00:00,  5.32batch/s, loss=1.64]
+Starting Evaluation on task: 4
+Evaluating on seen data: 100%|████████████████████████████████████████████████████████████████████████████████████| 80/80 [01:08<00:00,  1.16batch/s]
+After task 4, overall acc on seen data: 0.300
+  Task 0 → acc: 0.234
+  Task 1 → acc: 0.197
+  Task 2 → acc: 0.182
+  Task 3 → acc: 0.361
+  Task 4 → acc: 0.527
+Starting full evaluation on task: 4
+Evaluating on full CIFAR10: 100%|█████████████████████████████████████████████████████████████████████████████████| 80/80 [01:04<00:00,  1.23batch/s]
+After task 4, CIFAR10 full acc: 0.300
