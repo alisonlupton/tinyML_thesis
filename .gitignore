@@ -15,3 +15,7 @@ dog_behaviours/processed_data
 dog_behaviours/logs
 dog_breedsprocessed_data
 PlotNeuralNet/
+experiements_old/baseline_6/birealnet18/
+experiements_old/baseline_6/models
+dog_behaviours/processed_data/
+experiements_old/baseline_6/birealnet18/tinyimagenet.pth

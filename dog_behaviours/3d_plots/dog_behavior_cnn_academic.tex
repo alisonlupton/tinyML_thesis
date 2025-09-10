@@ -123,9 +123,9 @@
 
 % store / retrieve arrows (simple, readable)
 \draw[->,thick] ($(feat-south)+(0,-0.02)$) -- ($(replay.north)+(0,0.03)$)
-  node[midway,right=1pt,wb] {store};
+  node[midway,wb,xshift=20pt,yshift=6pt] {store};
 
 \draw[->,thick] ($(replay.north)+(0,0.03)$) .. controls +(1.0,1.5) and +(-1.0,-1.5) .. ($(head-south)+(0,-0.02)$)
-  node[midway,right=2pt,wb] {retrieve};
+node[midway,wb,xshift=12pt,yshift=-10pt] {retrieve};
 \end{tikzpicture}
 \end{document}

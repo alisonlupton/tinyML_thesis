@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.7.31)  10 SEP 2025 05:31
+This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.7.31)  10 SEP 2025 13:10
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -562,7 +562,7 @@ Here is how much of TeX's memory you used:
 .pfb></usr/local/texlive/2024basic/texmf-dist/fonts/type1/public/amsfonts/cm/cm
 r7.pfb></usr/local/texlive/2024basic/texmf-dist/fonts/type1/public/amsfonts/cm/
 cmsy7.pfb>
-Output written on dog_behavior_cnn_academic.pdf (1 page, 39700 bytes).
+Output written on dog_behavior_cnn_academic.pdf (1 page, 39707 bytes).
 PDF statistics:
  50 PDF objects out of 1000 (max. 8388607)
  24 compressed objects within 1 object stream
